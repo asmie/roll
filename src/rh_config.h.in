@@ -1,0 +1,35 @@
+
+#ifndef GENERATED_RH_H_IN
+#define GENERATED_RH_H_IN
+
+// Versioning
+#define RH_VERSION_MAJOR		@RH_VERSION_MAJOR@
+#define RH_VERSION_MINOR		@RH_VERSION_MINOR@
+#define RH_VERSION_REV			@RH_VERSION_REV@
+
+// System header checks
+#cmakedefine	RH_SYSTEM_HAVE_CSTDLIB
+#cmakedefine	RH_SYSTEM_HAVE_CSTDIO
+#cmakedefine	RH_SYSTEM_HAVE_IOSTREAM
+#cmakedefine	RH_SYSTEM_HAVE_CSTRING
+
+
+/* Automatic checks for critical components. 
+ Not all above libraries and files are needed, however some of them are really mandatory.
+ Abort if they are not present.
+ 
+ To be honest, those checks will fail only under some abnormal compiler which is not compatible with
+ the mainstream ones.
+*/
+
+// These checks are critical - if we detect here that some of the files are missing then we know
+// that compiler is somethig weird - either is incomplete or really, really non-standard.
+
+#if !defined(RH_SYSTEM_HAVE_CSTDLIB) || !defined(RH_SYSTEM_HAVE_CSTDIO) || !defined(RH_SYSTEM_HAVE_IOSTREAM) || \
+	!defined(RH_SYSTEM_HAVE_CSTRING)  	
+#error "Compiler without some critical headers detected!"
+#endif
+
+
+
+#endif /* GENERATED_RH_H_IN */
