@@ -152,7 +152,6 @@ public:
 		int i = 0;
 		for (auto& v : deltas)
 		{
-			std::cout << "Writing chunk " << i++ << " type: " << std::to_underlying(v.type) << std::endl;
 			delta.write_chunk(std::to_underlying(v.type));
 			delta.write_chunk(v.chunk_data.signature);
 			delta.write_chunk(v.chunk_data.hash.data(), v.chunk_data.hash.size());
