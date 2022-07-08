@@ -25,7 +25,7 @@ At the end of the procedure all deltas are written into the delta file. For thos
 ## Tests
 
 Application has unit tests done using Google Test framework.
-Tests are run on the GitHub action - after each successful build, full unit test are run.
+Tests should be done on the computer itself as GTest on GitHub fails when starting execution.
 
 Tested under valgrind - no leaks detected.
 
