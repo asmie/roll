@@ -2,39 +2,36 @@
 
 ![CMake](https://github.com/asmie/roll/actions/workflows/cmake.yml/badge.svg)
 
-## General Description & the algorithm
+## General description & the algorithm
 
-Rolling (rollin' on river ;)) hashes is app to track changes between the files. It uses Rabin fingerprints to fast scan file chunks and BLAKE-512 hash algorithm for creating strong hashes to verify Rabin matches.
+Rolling (rollin' on the river ;)) hashes is an app to track changes between files. It uses Rabin fingerprints to quickly scan file chunks, and the BLAKE-512 hashing algorithm to generate strong hashes for verifying Rabin matches.
 
-Both files are divided into chunks and scanned using 48-byte scanning window and searched for chunk boundaries - those chunks are dynamic size, based on the file data. If lower 13 bits of data windows is set to zero chunk boundary is found. Dynamic chunks approach makes algorithm to be more accourant and not dependant on chunk shift. When chunk boundaries are identified application write the Rabin fingerprint and BLAKE hash. Doing so, there is created a list of chunks for each file.
+Both files are divided into chunks using a 48-byte sliding window, which scans the data and looks for chunk boundaries. These chunks are dynamic in size, based on the content of the file. A chunk boundary is identified when the lower 13 bits of the windowed data equal zero. This dynamic chunking approach makes the algorithm more accurate and resistant to shifts in the data. Once boundaries are found, the app writes down the Rabin fingerprint and the BLAKE hash—effectively creating a list of chunks for each file.
 
-The next step is connected with creating deltas.
+Next up: creating the deltas.
 
-In fact, we could stop everything right here. Dynamic chunks gives us shift-resistance and therefore, delta file could be built only using existing chunks info and treat all the other data as additions. This could be similar to the approach used in LBFS (Low Bandwitch File System), where every modification creates just new chunk to be sent. 
-Taking above approach could lead to much simplier code but probably slightly bigger delta files (as everything would be treated as addition), but the difference could be not big enough to create more compilcated code.
+Now, in theory, we could stop here. Thanks to shift-resistant dynamic chunking, we could build a delta file using just the chunk info—treating any unmatched data as additions. This is similar to what LBFS (Low Bandwidth File System) does, where every change just creates a new chunk to be sent. Taking this approach would make the code a lot simpler, although the delta files might end up slightly larger. But honestly, the size difference might not be big enough to justify a more complex solution.
 
-However, recruitment task conditions stated clearly, that there is a must to identify chunk removal and chunk modification.
+But... app must detect chunk removals and modifications.
 
-To do so, we are taking into account both lists (chunk list from original and new file) and try to  find out what have changed. Thanks to dynamic chunk size we are sure that each same chunk will be idnetified in both files (even with shift).
+To handle this, we compare the chunk lists from the original and new files and try to figure out what changed. Thanks to the dynamic chunking, we can be confident that matching chunks will be identified in both files—even if their positions have shifted.
 
-So, algorithm takes list of the new chunks one by one and try to match them with chunks from original file. If chunk matches, in delta file will be note that the chunk are identical. If not matches on the same position we're trying to look for the chunk in file in some further position. If chunk matches on the other position we need to take care chunks between the actual position and chunk position in original file. The chunks will be either marked for removal (because they are in the original file and not in the new one) or modification (this is the weakest point when there are many chunks between).
-If there are any chunks that are present in the new file but not in the original file, they will be marked for addition.
+So, the algorithm takes chunks from the new file one by one and tries to match them with chunks from the original file. If a chunk matches at the same position, the delta file simply notes that they're identical. If it doesn't match at that spot, we search further in the original file. If we find the chunk elsewhere, we have to account for all the chunks between the current position and the match. Those intermediate chunks are either removed (if they’re only in the original file) or marked as modified (this part can get tricky when there are lots of chunks in between). Any chunks that are in the new file but not in the original are marked as additions.
 
-At the end of the procedure all deltas are written into the delta file. For those chunks, that are marked as modified, chunks from original and new file are read one more time and there is bin diff applied on them, just to ensure that only exact changes will be in the delta file.
+At the end of it all, the app writes out the deltas to the delta file. For chunks marked as modified, the original and new chunks are read again, and a binary diff is applied to ensure that only the exact changes are included.
 
 ## Tests
 
-Application has unit tests done using Google Test framework.
-Tests should be done on the computer itself as GTest on GitHub fails when starting execution.
+The application includes unit tests written using the Google Test framework. Tests should be run locally, as running GTest on GitHub fails to start execution.
 
-Tested under valgrind - no leaks detected.
+The application has been tested under Valgrind—no memory leaks were detected.
 
 ## Compilation
 
 ### Prerequisites
 
 Application has no external dependencies. roll demands:
-* compiler compatible with GCC, Clang or MSVC, supporting at C++23 standard;
+* compiler compatible with GCC, Clang or MSVC, supporting the C++23 standard;
 * standard C++ library;
 * cmake 3.16 or newer.
 
