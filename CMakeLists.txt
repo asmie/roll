@@ -61,13 +61,17 @@ target_link_libraries(${PROJECT_NAME} Threads::Threads ${ADDITIONAL_LIBRARIES})
 # Testing time
 enable_testing()
 
-# Try to find GTest
-find_package(GTest)
+include(FetchContent)
+FetchContent_Declare(
+        googletest
+        URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+        DOWNLOAD_EXTRACT_TIMESTAMP false
+)
+FetchContent_MakeAvailable(googletest)
 
-if(GTEST_FOUND)
-	include_directories(src ${CMAKE_CURRENT_BINARY_DIR}/generated ${GTEST_INCLUDE_DIR})
-	file(GLOB TEST_SOURCES tests/*.cpp ${SOURCES} )
-	add_executable(${PROJECT_NAME}_unit ${TEST_SOURCES})
-	target_link_libraries(${PROJECT_NAME}_unit PUBLIC gtest pthread ${CMAKE_DL_LIBS} ${ADDITIONAL_LIBRARIES})
-	add_test(${PROJECT_NAME}_unit_test ${PROJECT_NAME}_unit)
-endif(GTEST_FOUND)
+enable_testing()
+include_directories(src ${CMAKE_CURRENT_BINARY_DIR}/generated)
+file(GLOB TEST_SOURCES tests/*.cpp ${SOURCES} )
+add_executable(${PROJECT_NAME}_unit ${TEST_SOURCES})
+target_link_libraries(${PROJECT_NAME}_unit PUBLIC gtest_main pthread ${CMAKE_DL_LIBS} ${ADDITIONAL_LIBRARIES})
+add_test(${PROJECT_NAME}_unit_test ${PROJECT_NAME}_unit)
