@@ -18,17 +18,13 @@ bool FileIO::open(std::string file_path, FileMode mode)
 	
 	if (mode == FileMode::OUT || mode == FileMode::INOUT)
 		fmode |= std::fstream::out;
-	
-	try {
-		f_.open(file_path, fmode);
-	}
-	catch (std::fstream::failure&) {
-		return false;
-	}
-	
-	if (f_.good())
-		return true;
-	return false;
+
+	if (f_.is_open())
+		f_.close();
+
+	f_.open(file_path, fmode);
+
+	return f_.good();
 }
 
 void FileIO::close()
@@ -52,14 +48,13 @@ bool FileIO::write_byte(uint8_t byte)
 
 std::unique_ptr<std::vector<uint8_t>> FileIO::read_chunk(size_t chunk_size)
 {
+	if (!f_.is_open() || chunk_size == 0)
+		return std::make_unique<std::vector<uint8_t>>();
+
 	auto vec = std::make_unique<std::vector<uint8_t>>(chunk_size);
-	
-	try {
-		f_.read(reinterpret_cast<char*>(vec->data()), chunk_size);
-		vec.get()->resize(f_.gcount());									// Needed to return only amount of read bytes
-	}
-	catch (std::fstream::failure&) { }
-	
+	f_.read(reinterpret_cast<char*>(vec->data()), chunk_size);
+	vec->resize(static_cast<size_t>(f_.gcount()));  // Trim to actual read size
+
 	return vec;
 }
 
