@@ -27,7 +27,7 @@ TEST(Signature, generate_signature)
 {
 	Signature<RKFinger, BLAKE512> signatures;
 
-	signatures.generate_signatures("testfile");
+	signatures.generate_signatures("../tests/testfile");
 
 	auto chunks = signatures.get_chunks();
 
