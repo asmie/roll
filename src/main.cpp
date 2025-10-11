@@ -1,6 +1,4 @@
 #include <iostream>
-#include <future>
-#include <cstring>
 
 #include "rh_config.h"
 
@@ -32,7 +30,12 @@ int main(int argc, const char **argv)
 	new_signature.generate_signatures(argv[2]);
 
 	Delta<RKFinger, BLAKE512> delta;
-	delta.generate_delta(old_signature, new_signature, argv[1], argv[2], argv[3]);
+	auto result = delta.generate_delta(old_signature, new_signature, argv[1], argv[2], argv[3]);
+
+	if (!result.success) {
+		std::cerr << "Error generating delta: " << result.error_message << std::endl;
+		return 1;
+	}
 
 	return 0;
 }

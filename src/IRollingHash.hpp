@@ -13,9 +13,14 @@ class IRollingHash {
 public:
 	// Typedef for static asserts.
 	typedef T RollingHashType;
-	
+
 	/**
-	* Initializes rollong hash some inital values. Can depend on window size. Amount of the 
+	* Virtual destructor for proper cleanup in derived classes.
+	*/
+	virtual ~IRollingHash() = default;
+
+	/**
+	* Initializes rolling hash with initial values. Can depend on window size. Amount of the
 	* elements is taken directly from vector size.
 	* @param[in] initial vector with initial values
 	* @return True if initialization was successful.

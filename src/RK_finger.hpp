@@ -33,16 +33,16 @@ public:
 	
 	/**
 	* Computes initial hash value.
-	* Can be used to clear current hash and initalize RKFinger object with new data.
+	* Can be used to clear current hash and initialize RKFinger object with new data.
 	* @param initial[in] initial data to be hashed - must be at least window_size length (but still only window_size bytes will be used).
-	* @return True if init was successfull, otherwise false (if initial data is too short).
+	* @return True if init was successful, otherwise false (if initial data is too short).
 	*/
 	bool initialize(const std::vector<uint8_t>& initial) noexcept override {
 		if (initial.size() < window_size_)
 			return false;
 
 		fingerprint_ = 0;
-		last_byte = initial.back();
+		last_byte = initial[window_size_-1];  // Use the last byte of the window, not the vector
 	
 		for (unsigned int i = 0; i < window_size_; i++)
 			fingerprint_ = (alphabet_size_ * fingerprint_ + initial[i]) % modulus_;
@@ -55,7 +55,8 @@ public:
 	* @return the new rolling hash value.
 	*/
 	uint64_t compute_next(uint8_t byte) noexcept override {
-		fingerprint_ = (alphabet_size_ * (fingerprint_ - last_byte * h_) + byte) % modulus_;
+		// Add modulus before subtraction to prevent underflow
+		fingerprint_ = (alphabet_size_ * ((fingerprint_ + modulus_) - (last_byte * h_) % modulus_) + byte) % modulus_;
 		last_byte = byte;
 		return fingerprint_;
 	}

@@ -32,14 +32,18 @@ template <class T, class U>
 class Signature {
 	static_assert(std::is_base_of<IRollingHash<typename T::RollingHashType>, T>::value, "T must derive from IRollingHash");
 	static_assert(std::is_base_of<IHash, U>::value, "U must derive from IHash");
-	
+
+	static constexpr size_t MIN_CHUNK_SIZE = 512;     // Minimum chunk size in bytes
+	static constexpr size_t MAX_CHUNK_SIZE = 16384;   // Maximum chunk size in bytes (16KB)
+	static constexpr size_t TARGET_CHUNK_SIZE = 8192;  // Target average chunk size
+
 public:
 	/**
 	* Generate signatures for specified file and keep it in the object.
 	* Signatures are generated using provided rolling hash and hash algorithms.
 	* @param[in] datafile file with data for signatures to be generated
 	*/
-	void generate_signatures(std::string datafile) {
+	void generate_signatures(const std::string& datafile) {
 		FileIO file;
 		T fingerprint;
 		U hash_func;
@@ -83,7 +87,25 @@ public:
 
 			current_fingerprint = fingerprint.compute_next(b);
 
-			if (((last << 8 | b) & 0x1FFFL) == 0)					// chunk boundary found
+			// Adaptive boundary detection based on chunk size
+			bool boundary_found = false;
+			if (chunk.size() >= MAX_CHUNK_SIZE) {
+				// Force boundary at maximum chunk size
+				boundary_found = true;
+			} else if (chunk.size() >= MIN_CHUNK_SIZE) {
+				// Use adaptive mask based on chunk size for better small file handling
+				uint32_t mask;
+				if (chunk.size() < 2048) {
+					mask = 0x1FF;  // 1/512 probability for small chunks
+				} else if (chunk.size() < 4096) {
+					mask = 0x7FF;  // 1/2048 probability for medium chunks
+				} else {
+					mask = 0x1FFF; // 1/8192 probability for large chunks
+				}
+				boundary_found = (((last << 8 | b) & mask) == 0);
+			}
+
+			if (boundary_found)					// chunk boundary found
 			{
 				SignedChunk<typename T::RollingHashType> schunk;
 				schunk.signature = current_fingerprint;

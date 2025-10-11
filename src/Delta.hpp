@@ -3,22 +3,24 @@
 
 #include "Signature.hpp"
 #include "FileIO.hpp"
-#include "Delta.hpp"
 
 #include <string>
 #include <vector>
+#include <unordered_map>
+#include <algorithm>
 #include <cstdint>
-#include <utility>
+#include <optional>
+#include <span>
 
 /**
 * Entry type for each delta record.
 * Each record represent original, added, modified or removed chunk.
 */
-enum class EntryType {
-	ORIGINAL_CHUNK,
-	ADDED_CHUNK,
-	MODIFIED_CHUNK,
-	REMOVED_CHUNK
+enum class EntryType : uint8_t {
+    ORIGINAL_CHUNK = 0,
+    ADDED_CHUNK = 1,
+    MODIFIED_CHUNK = 2,
+    REMOVED_CHUNK = 3
 };
 
 /**
@@ -26,212 +28,360 @@ enum class EntryType {
 */
 template <class T>
 struct DeltaEntry {
-	EntryType type;									/*!< Entry type (original, added etc) */
-	SignedChunk<T> chunk_data;						/*!< Signed chunk structure connected to the delta */
-	std::vector<uint8_t> chunk_data_raw;			/*!< Raw chunk data (only for added and modified) */
+    EntryType type;									/*!< Entry type (original, added etc) */
+    SignedChunk<T> chunk_data;						/*!< Signed chunk structure connected to the delta */
+    std::vector<uint8_t> chunk_data_raw;			/*!< Raw chunk data (only for added and modified) */
 };
 
-
 /**
-* Class for generating deltas between two files using their signatures.
+* Optimized class for generating deltas between two files using their signatures.
+*
+* Key improvements:
+* - O(n) complexity using hash maps instead of O(n²) nested loops
+* - Run-length encoding for efficient diff storage
+* - Proper error handling with Result structure
+* - Modular design with clear phases
 */
 template<class T, class U>
 class Delta {
 public:
-	static_assert(std::is_base_of<IRollingHash<typename T::RollingHashType>, T>::value, "T must derive from IRollingHash");
-	static_assert(std::is_base_of<IHash, U>::value, "U must derive from IHash");
-	
-	/**
-	* Generates delta between two files.
-	* @param[in] original original file signatures
-	* @param[in] newfile new file signatures
-	* @param[in] oldfile old file path
-	* @param[in] file_to_check new file path
-	* @param[in] delta_file delta file path
-	*/
-	void generate_delta(const Signature<T, U>& original, const Signature<T, U>& newfile, std::string oldfile, std::string file_to_check, std::string delta_file)
-	{
-		std::vector<DeltaEntry<typename T::RollingHashType>> deltas;
-		FileIO old;
-		FileIO file;
-		FileIO delta;
-		T fingerprint;
-		
-		auto original_chunks = original.get_chunks();
-		auto new_chunks = newfile.get_chunks();
+    static_assert(std::is_base_of<IRollingHash<typename T::RollingHashType>, T>::value,
+                  "T must derive from IRollingHash");
+    static_assert(std::is_base_of<IHash, U>::value, "U must derive from IHash");
 
-		old.open(oldfile, FileMode::IN);
-		file.open(file_to_check, FileMode::IN);
-		delta.open(delta_file, FileMode::OUT);
+    /**
+    * Result of delta generation with error handling
+    */
+    struct Result {
+        bool success;
+        std::string error_message;
+        size_t chunks_processed;
+        size_t bytes_written;
+    };
 
-		if (!file.is_open() || !old.is_open() || !delta.is_open())
-			return;
+    /**
+    * Generates delta between two files with optimized algorithm.
+    * @param[in] original original file signatures
+    * @param[in] newfile new file signatures
+    * @param[in] oldfile old file path
+    * @param[in] file_to_check new file path
+    * @param[in] delta_file delta file path
+    * @return Result structure with success status, error message, and statistics
+    */
+    Result generate_delta(const Signature<T, U>& original,
+                         const Signature<T, U>& newfile,
+                         const std::string& oldfile,
+                         const std::string& file_to_check,
+                         const std::string& delta_file)
+    {
+        Result result{false, "", 0, 0};
 
-		size_t original_position = 0;
-		size_t new_position = 0;
-		while (new_position < new_chunks.size() || original_position < original_chunks.size())
-		{
-			if (original_position >= original_chunks.size()) {		// New file has more chunks than old file - add all new chunks
-				DeltaEntry<typename T::RollingHashType> de;
-				de.type = EntryType::ADDED_CHUNK;
-				de.chunk_data = new_chunks[new_position];
-				de.chunk_data_raw = std::move(*(file.read_chunk(de.chunk_data.chunk_size, de.chunk_data.start_offset).get()));
-				deltas.push_back(de);
-				new_position++;
-				continue;
-			}
+        // Open files with error checking
+        FileIO old, file, delta;
+        if (!openFiles(old, file, delta, oldfile, file_to_check, delta_file, result)) {
+            return result;
+        }
 
-			if (new_position >= new_chunks.size()) {				// New file has less chunks than old file - remove all chunks
-				DeltaEntry<typename T::RollingHashType> de;
-				de.type = EntryType::REMOVED_CHUNK;
-				de.chunk_data = original_chunks[original_position];
-				deltas.push_back(de);
-				original_position++;
-				continue;
-			}
+        const auto& original_chunks = original.get_chunks();
+        const auto& new_chunks = newfile.get_chunks();
 
-			if (new_chunks[new_position] == original_chunks[original_position]) {		// Chunks are equal on the some positions
-				DeltaEntry<typename T::RollingHashType> de;
-				de.type = EntryType::ORIGINAL_CHUNK;
-				de.chunk_data = original_chunks[original_position];
-				deltas.push_back(de);
-				original_position++;
-				new_position++;
-				continue;
-			}
-			
-			bool isFound = false;
-			// Try to find the same chunk on the other further position, if so, chunks need to be removed
-			for (auto j = original_position; j < original_chunks.size(); j++) {
-				if (new_chunks[new_position] == original_chunks[j]) {			// Chunk found in original file further
-					while (original_position != j) {
-						DeltaEntry<typename T::RollingHashType> de;
-						de.type = EntryType::REMOVED_CHUNK;
-						de.chunk_data = original_chunks[original_position];
-						deltas.push_back(de);
-						original_position++;
-					}											// We need to add all chunks as removed deltas
-					isFound = true;
-					break;
-				}
-			}
+        // Build hash map for O(1) chunk lookups
+        auto chunk_map = buildChunkMap(original_chunks);
 
-			if (isFound)
-				continue;						// Chunk found, don't increment new_position as we will compare this chunk in next loop
-			
-			// If chunk is not found on the other position, it is added or modified
-			// If next chunks are ok, this chunk is modified
-			// If next chunks are not ok, this chunk can be treated as added
-			for (auto j = original_position; j < original_chunks.size(); j++) {
-				//std::cout << "Comparing pos: " << new_position  << " with " << j << ": " << new_chunks[new_position + 1].signature << " and " << original_chunks[j].signature << std::endl;
-				if (new_chunks[new_position+1] == original_chunks[j]) {			// Chunk found - modify chunk
-					DeltaEntry<typename T::RollingHashType> de;
-					de.type = EntryType::MODIFIED_CHUNK;
-					de.chunk_data = new_chunks[new_position];
-					de.chunk_data_raw = std::move(*(
-						make_diff(old.read_chunk(de.chunk_data.chunk_size, de.chunk_data.start_offset), file.read_chunk(de.chunk_data.chunk_size, de.chunk_data.start_offset))));
-					deltas.push_back(de);
-					isFound = true;
-					new_position++;
-					original_position++;
-					break;
-				}
-			}
-			
-			if (isFound)
-				continue;
-			
-			// If chunk is not found on the other position, it is added
-			DeltaEntry<typename T::RollingHashType> de;
-			de.type = EntryType::ADDED_CHUNK;
-			de.chunk_data = new_chunks[new_position];
-			de.chunk_data_raw = std::move(*(file.read_chunk(de.chunk_data.chunk_size, de.chunk_data.start_offset).get()));
-			deltas.push_back(de);
-			new_position++;
-		}
+        // Process chunks with optimized algorithm
+        if (original_chunks.size() == 1 && new_chunks.size() == 1) {
+            processSingleChunkFiles(original_chunks[0], new_chunks[0], old, file, delta, result);
+        } else {
+            processMultipleChunks(original_chunks, new_chunks, chunk_map, old, file, delta, result);
+        }
 
-		int i = 0;
-		for (auto& v : deltas)
-		{
-			delta.write_chunk(std::to_underlying(v.type));
-			delta.write_chunk(v.chunk_data.signature);
-			delta.write_chunk(v.chunk_data.hash.data(), v.chunk_data.hash.size());
-			delta.write_chunk(v.chunk_data.chunk_size);
-			if (v.type == EntryType::ADDED_CHUNK || v.type == EntryType::MODIFIED_CHUNK)
-				delta.write_chunk(v.chunk_data_raw.data(), v.chunk_data_raw.size());
-		}
-		
-		old.close();
-		file.close();
-		delta.close();
-	}
+        old.close();
+        file.close();
+        delta.close();
 
+        result.success = true;
+        return result;
+    }
 
-	/**
-	* Create a data vector with differences between two data chunks
-	* This could be really optimized to produce more efficient data diff - now we are changing every single byte but
-	* there could be done it to incorporate slices of data and also we can try to find original data with shifts (now shifts are ignored).
-	* This solution is cheap when little changes are made in the data but when there are many single changes the cost is bigger.
-	* The format for now is:
-	* A/M/R pos byte
-	* like:
-	* M0300000049	which means modification of 4th byte to 0x49.
-	*/
-	std::unique_ptr<std::vector<uint8_t>> make_diff(std::unique_ptr<std::vector<uint8_t>> b1, std::unique_ptr<std::vector<uint8_t>> b2)
-	{
-		std::unique_ptr<std::vector<uint8_t>> diff = std::make_unique<std::vector<uint8_t>>();
+private:
+    // Hash function for chunk lookup
+    struct ChunkHash {
+        size_t operator()(const SignedChunk<typename T::RollingHashType>& chunk) const {
+            // Combine signature and first few hash bytes for unique key
+            size_t h1 = std::hash<typename T::RollingHashType>{}(chunk.signature);
+            size_t h2 = chunk.hash.size() >= 8 ?
+                       *reinterpret_cast<const size_t*>(chunk.hash.data()) : 0;
+            return h1 ^ (h2 << 1);
+        }
+    };
 
-		size_t i = 0;
-		size_t j = 0;
-		
-		while (i < b1->size() && j < b2->size())
-		{
-			if (b1->at(i) != b2->at(j))
-			{
+    struct ChunkEqual {
+        bool operator()(const SignedChunk<typename T::RollingHashType>& a,
+                       const SignedChunk<typename T::RollingHashType>& b) const {
+            return a == b;
+        }
+    };
 
-				// Write the position
-				diff->push_back('M');			// Modify byte
-				diff->push_back(i << 24);
-				diff->push_back(i << 16);
-				diff->push_back(i << 8);
-				diff->push_back(i);
+    using ChunkMap = std::unordered_map<SignedChunk<typename T::RollingHashType>,
+                                        size_t, ChunkHash, ChunkEqual>;
 
-				// Write the new value
-				diff->push_back(b1->at(i));
-			}
-			i++;
-			j++;
-		}
+    /**
+    * Build hash map of chunks for O(1) lookups
+    */
+    ChunkMap buildChunkMap(const std::vector<SignedChunk<typename T::RollingHashType>>& chunks) {
+        ChunkMap map;
+        map.reserve(chunks.size());
+        for (size_t i = 0; i < chunks.size(); ++i) {
+            map[chunks[i]] = i;
+        }
+        return map;
+    }
 
-		while (i < b1->size())				// Some data left - we need to remove it.
-		{
-			// Write the position
-			diff->push_back('R');			// Remove byte
-			diff->push_back(i << 24);
-			diff->push_back(i << 16);
-			diff->push_back(i << 8);
-			diff->push_back(i);
-			i++;
-		}
-		
-		while (j < b2->size())			// Some data left - we need to add it.
-		{
-			// Write the position
-			diff->push_back('A');			// Add byte
-			diff->push_back(j << 24);
-			diff->push_back(j << 16);
-			diff->push_back(j << 8);
-			diff->push_back(j);
+    /**
+    * Open all required files with error handling
+    */
+    bool openFiles(FileIO& old, FileIO& file, FileIO& delta,
+                   const std::string& oldfile, const std::string& file_to_check,
+                   const std::string& delta_file, Result& result) {
+        if (!old.open(oldfile, FileMode::IN)) {
+            result.error_message = "Failed to open old file: " + oldfile;
+            return false;
+        }
+        if (!file.open(file_to_check, FileMode::IN)) {
+            result.error_message = "Failed to open new file: " + file_to_check;
+            return false;
+        }
+        if (!delta.open(delta_file, FileMode::OUT)) {
+            result.error_message = "Failed to create delta file: " + delta_file;
+            return false;
+        }
+        return true;
+    }
 
-			// Write the new value
-			diff->push_back(b2->at(j));
-			j++;
-		}
-		
-		return diff;
-	}
+    /**
+    * Process single chunk files
+    */
+    void processSingleChunkFiles(const SignedChunk<typename T::RollingHashType>& old_chunk,
+                                 const SignedChunk<typename T::RollingHashType>& new_chunk,
+                                 FileIO& old, FileIO& file, FileIO& delta, Result& result) {
+        DeltaEntry<typename T::RollingHashType> entry;
+
+        if (old_chunk == new_chunk) {
+            entry.type = EntryType::ORIGINAL_CHUNK;
+            entry.chunk_data = old_chunk;
+        } else {
+            entry.type = EntryType::MODIFIED_CHUNK;
+            entry.chunk_data = new_chunk;
+
+            auto old_data = old.read_chunk(old_chunk.chunk_size, old_chunk.start_offset);
+            auto new_data = file.read_chunk(new_chunk.chunk_size, new_chunk.start_offset);
+
+            if (old_data && new_data) {
+                entry.chunk_data_raw = createOptimizedDiff(*old_data, *new_data);
+            }
+        }
+
+        writeDeltaEntry(delta, entry, result);
+        result.chunks_processed = 1;
+    }
+
+    /**
+    * Process multiple chunks with optimized algorithm
+    *
+    * Uses 4-phase approach:
+    * 1. Match identical chunks at same positions (O(n))
+    * 2. Find moved chunks using hash map (O(n))
+    * 3. Handle modifications and additions (O(n))
+    * 4. Process removed chunks (O(n))
+    */
+    void processMultipleChunks(const std::vector<SignedChunk<typename T::RollingHashType>>& original_chunks,
+                               const std::vector<SignedChunk<typename T::RollingHashType>>& new_chunks,
+                               const ChunkMap& chunk_map,
+                               FileIO& old, FileIO& file, FileIO& delta, Result& result) {
+        std::vector<bool> original_used(original_chunks.size(), false);
+        std::vector<bool> new_processed(new_chunks.size(), false);
+
+        // Phase 1: Match identical chunks at same positions
+        size_t min_size = std::min(original_chunks.size(), new_chunks.size());
+        for (size_t i = 0; i < min_size; ++i) {
+            if (original_chunks[i] == new_chunks[i]) {
+                DeltaEntry<typename T::RollingHashType> entry;
+                entry.type = EntryType::ORIGINAL_CHUNK;
+                entry.chunk_data = original_chunks[i];
+                writeDeltaEntry(delta, entry, result);
+
+                original_used[i] = true;
+                new_processed[i] = true;
+                result.chunks_processed++;
+            }
+        }
+
+        // Phase 2: Find moved chunks using hash map (O(1) lookup)
+        for (size_t i = 0; i < new_chunks.size(); ++i) {
+            if (new_processed[i]) continue;
+
+            auto it = chunk_map.find(new_chunks[i]);
+            if (it != chunk_map.end() && !original_used[it->second]) {
+                // Chunk moved from different position
+                DeltaEntry<typename T::RollingHashType> entry;
+                entry.type = EntryType::ORIGINAL_CHUNK;
+                entry.chunk_data = new_chunks[i];
+                writeDeltaEntry(delta, entry, result);
+
+                original_used[it->second] = true;
+                new_processed[i] = true;
+                result.chunks_processed++;
+            }
+        }
+
+        // Phase 3: Handle modifications and additions
+        for (size_t i = 0; i < new_chunks.size(); ++i) {
+            if (new_processed[i]) continue;
+
+            DeltaEntry<typename T::RollingHashType> entry;
+
+            // Check if this is a modification of nearby chunk
+            bool is_modification = false;
+            if (i < original_chunks.size() && !original_used[i]) {
+                // Likely a modification of the chunk at same position
+                entry.type = EntryType::MODIFIED_CHUNK;
+                entry.chunk_data = new_chunks[i];
+
+                auto old_data = old.read_chunk(original_chunks[i].chunk_size,
+                                              original_chunks[i].start_offset);
+                auto new_data = file.read_chunk(new_chunks[i].chunk_size,
+                                               new_chunks[i].start_offset);
+
+                if (old_data && new_data) {
+                    entry.chunk_data_raw = createOptimizedDiff(*old_data, *new_data);
+                    is_modification = true;
+                    original_used[i] = true;
+                }
+            }
+
+            if (!is_modification) {
+                // New chunk added
+                entry.type = EntryType::ADDED_CHUNK;
+                entry.chunk_data = new_chunks[i];
+
+                auto chunk_data = file.read_chunk(entry.chunk_data.chunk_size,
+                                                 entry.chunk_data.start_offset);
+                if (chunk_data) {
+                    entry.chunk_data_raw = std::move(*chunk_data);
+                }
+            }
+
+            writeDeltaEntry(delta, entry, result);
+            result.chunks_processed++;
+        }
+
+        // Phase 4: Handle removed chunks
+        for (size_t i = 0; i < original_chunks.size(); ++i) {
+            if (!original_used[i]) {
+                DeltaEntry<typename T::RollingHashType> entry;
+                entry.type = EntryType::REMOVED_CHUNK;
+                entry.chunk_data = original_chunks[i];
+                writeDeltaEntry(delta, entry, result);
+                result.chunks_processed++;
+            }
+        }
+    }
+
+    /**
+    * Create optimized diff using run-length encoding for sequences
+    *
+    * Format: 'D' <position:4> <count:1> <bytes...>
+    * This efficiently encodes up to 255 consecutive changes in 6+n bytes
+    * instead of the original 6 bytes per change.
+    */
+    std::vector<uint8_t> createOptimizedDiff(const std::vector<uint8_t>& old_data,
+                                            const std::vector<uint8_t>& new_data) {
+        std::vector<uint8_t> diff;
+        diff.reserve(std::min(old_data.size(), new_data.size()) / 4); // Estimate
+
+        size_t i = 0, j = 0;
+
+        while (i < old_data.size() && j < new_data.size()) {
+            // Find runs of matching bytes
+            while (i < old_data.size() && j < new_data.size() &&
+                   old_data[i] == new_data[j]) {
+                i++;
+                j++;
+            }
+
+            // Find runs of differences
+            size_t diff_start = i;
+            std::vector<uint8_t> diff_bytes;
+            while (i < old_data.size() && j < new_data.size() &&
+                   old_data[i] != new_data[j] && diff_bytes.size() < 255) {
+                diff_bytes.push_back(new_data[j]);
+                i++;
+                j++;
+            }
+
+            // Encode differences if any
+            if (!diff_bytes.empty()) {
+                // Format: 'D' <position:4> <count:1> <bytes...>
+                diff.push_back('D');
+                pushUint32(diff, diff_start);
+                diff.push_back(static_cast<uint8_t>(diff_bytes.size()));
+                diff.insert(diff.end(), diff_bytes.begin(), diff_bytes.end());
+            }
+        }
+
+        // Handle remaining bytes
+        if (i < old_data.size()) {
+            // Deletions
+            diff.push_back('X');
+            pushUint32(diff, i);
+            pushUint32(diff, old_data.size() - i);
+        }
+
+        if (j < new_data.size()) {
+            // Additions
+            diff.push_back('I');
+            pushUint32(diff, j);
+            diff.push_back(static_cast<uint8_t>(std::min(size_t(255), new_data.size() - j)));
+            for (size_t k = j; k < new_data.size() && k - j < 255; ++k) {
+                diff.push_back(new_data[k]);
+            }
+        }
+
+        return diff;
+    }
+
+    /**
+    * Helper to push 32-bit value as 4 bytes
+    */
+    void pushUint32(std::vector<uint8_t>& vec, uint32_t value) {
+        vec.push_back(value >> 24);
+        vec.push_back(value >> 16);
+        vec.push_back(value >> 8);
+        vec.push_back(value);
+    }
+
+    /**
+    * Write delta entry to file
+    */
+    void writeDeltaEntry(FileIO& delta, const DeltaEntry<typename T::RollingHashType>& entry,
+                        Result& result) {
+        result.bytes_written += sizeof(uint64_t); // Entry type
+        delta.write_chunk(static_cast<uint64_t>(entry.type));
+
+        result.bytes_written += sizeof(entry.chunk_data.signature);
+        delta.write_chunk(entry.chunk_data.signature);
+
+        result.bytes_written += entry.chunk_data.hash.size();
+        delta.write_chunk(const_cast<uint8_t*>(entry.chunk_data.hash.data()), entry.chunk_data.hash.size());
+
+        result.bytes_written += sizeof(entry.chunk_data.chunk_size);
+        delta.write_chunk(entry.chunk_data.chunk_size);
+
+        if (entry.type == EntryType::ADDED_CHUNK || entry.type == EntryType::MODIFIED_CHUNK) {
+            result.bytes_written += entry.chunk_data_raw.size();
+            delta.write_chunk(const_cast<uint8_t*>(entry.chunk_data_raw.data()), entry.chunk_data_raw.size());
+        }
+    }
 };
 
-
-
-#endif
+#endif // DELTA_HPP

@@ -2,14 +2,13 @@
 
 #include <fstream>
 #include <string>
-#include <future>
 
 FileIO::~FileIO()
 {
 	f_.close();
 }
 
-bool FileIO::open(std::string file_path, FileMode mode)
+bool FileIO::open(const std::string& file_path, FileMode mode)
 {
 	std::fstream::openmode fmode = std::fstream::binary;
 

@@ -10,12 +10,16 @@
 class IHash {
 public:
 	/**
-	* Get hash size in bytes. 
-	* Method is constexpr to allow to be used in compile time expressions (like array declarations).
+	* Virtual destructor for proper cleanup in derived classes.
+	*/
+	virtual ~IHash() = default;
+
+	/**
+	* Get hash size in bytes.
 	* @return hash size in bytes.
 	*/
-	constexpr virtual size_t get_hash_size() const noexcept = 0;
-	
+	virtual size_t get_hash_size() const noexcept = 0;
+
 	/**
 	* Computes hash and stores it in the given buffer.
 	* @param out[out] buffer to store hash.

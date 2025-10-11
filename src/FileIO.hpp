@@ -4,6 +4,7 @@
 #include <fstream>
 #include <vector>
 #include <memory>
+#include <string>
 
 /**
 * Helper enum to specify file access mode.
@@ -22,13 +23,21 @@ public:
 	FileIO() = default;
 	~FileIO();
 
+	// Delete copy constructor and copy assignment to prevent copies
+	FileIO(const FileIO&) = delete;
+	FileIO& operator=(const FileIO&) = delete;
+
+	// Allow move operations
+	FileIO(FileIO&&) = default;
+	FileIO& operator=(FileIO&&) = default;
+
 	/**
 	* Open file with given mode.
 	* @param[in] file_path path to the file.
 	* @param[in] mode file access mode.
 	* @return True if file was opened successfully, false otherwise.
 	*/
-	bool open(std::string file_path, FileMode mode);
+	bool open(const std::string& file_path, FileMode mode);
 
 	/**
 	* Close previously opened file.
