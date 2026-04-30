@@ -4,7 +4,8 @@
 #include <fstream>
 #include <vector>
 #include <memory>
-#include <string>
+#include <filesystem>
+#include <span>
 
 /**
 * Helper enum to specify file access mode.
@@ -37,7 +38,7 @@ public:
 	* @param[in] mode file access mode.
 	* @return True if file was opened successfully, false otherwise.
 	*/
-	bool open(const std::string& file_path, FileMode mode);
+	bool open(const std::filesystem::path& file_path, FileMode mode);
 
 	/**
 	* Close previously opened file.
@@ -80,6 +81,13 @@ public:
 	bool write_chunk(std::unique_ptr<std::vector<uint8_t>> buffer);
 
 	/**
+	* Write multiple bytes to stream.
+	* @param[in] chunk bytes to write.
+	* @return True if bytes were written successfully, false otherwise.
+	*/
+	bool write_chunk(std::span<const uint8_t> chunk);
+
+	/**
 	* Write single value to stream.
 	* @param[in] chunk value to write
 	* @return True if value was written successfully, false otherwise.
@@ -92,7 +100,7 @@ public:
 	* @param[in] chunk_size amount of data to be written
 	* @return True if values were written successfully, false otherwise.
 	*/
-	bool write_chunk(uint8_t* chunk, size_t chunk_size);
+	bool write_chunk(const uint8_t* chunk, size_t chunk_size);
 
 	/**
 	* Check if file is open.

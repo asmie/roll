@@ -3,6 +3,7 @@
 
 #include <vector>
 #include <cstdint>
+#include <span>
 
 /**
 * Rolling hash interface for all rolling hash implementations.
@@ -22,10 +23,10 @@ public:
 	/**
 	* Initializes rolling hash with initial values. Can depend on window size. Amount of the
 	* elements is taken directly from vector size.
-	* @param[in] initial vector with initial values
+	* @param[in] initial byte window with initial values
 	* @return True if initialization was successful.
 	*/
-	virtual bool initialize(const std::vector<uint8_t>& initial) noexcept = 0;
+	virtual bool initialize(std::span<const uint8_t> initial) noexcept = 0;
 
 	/**
 	* Updates rolling hash with new element.

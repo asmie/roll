@@ -6,6 +6,7 @@
 #include <vector>
 #include <cstdint>
 #include <climits>
+#include <span>
 
 constexpr unsigned int ALPHABET_DEF_SIZE = 256;
 constexpr unsigned int WINDOW_DEF_SIZE = 48;
@@ -37,7 +38,7 @@ public:
 	* @param initial[in] initial data to be hashed - must be at least window_size length (but still only window_size bytes will be used).
 	* @return True if init was successful, otherwise false (if initial data is too short).
 	*/
-	bool initialize(const std::vector<uint8_t>& initial) noexcept override {
+	bool initialize(std::span<const uint8_t> initial) noexcept override {
 		if (initial.size() < window_size_)
 			return false;
 

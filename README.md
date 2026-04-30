@@ -105,8 +105,8 @@ The delta file is a **binary format** containing:
 A delta viewer utility is provided to inspect delta files:
 
 ```bash
-# Build the delta viewer
-g++ -std=c++11 delta_viewer.cpp -o delta_viewer
+# Build the delta viewer with the rest of the C++23 project
+cmake --build . --target delta_viewer
 
 # View delta file contents
 ./delta_viewer changes.delta

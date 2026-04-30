@@ -14,7 +14,7 @@ set (RH_VERSION "${RH_VERSION_MAJOR}.${RH_VERSION_MINOR}.${RH_VERSION_REV}" )
 enable_language(CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Compilation options
 if (MSVC)
@@ -56,7 +56,11 @@ find_package(Threads REQUIRED)
 
 # Create executable
 add_executable(${PROJECT_NAME} ${SOURCES} src/main.cpp)
+target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_23)
 target_link_libraries(${PROJECT_NAME} Threads::Threads ${ADDITIONAL_LIBRARIES})
+
+add_executable(delta_viewer delta_viewer.cpp)
+target_compile_features(delta_viewer PRIVATE cxx_std_23)
 
 # Testing time
 enable_testing()
@@ -73,5 +77,6 @@ enable_testing()
 include_directories(src ${CMAKE_CURRENT_BINARY_DIR}/generated)
 file(GLOB TEST_SOURCES tests/*.cpp ${SOURCES} )
 add_executable(${PROJECT_NAME}_unit ${TEST_SOURCES})
+target_compile_features(${PROJECT_NAME}_unit PRIVATE cxx_std_23)
 target_link_libraries(${PROJECT_NAME}_unit PUBLIC gtest_main pthread ${CMAKE_DL_LIBS} ${ADDITIONAL_LIBRARIES})
 add_test(${PROJECT_NAME}_unit_test ${PROJECT_NAME}_unit)

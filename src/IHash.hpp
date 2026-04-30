@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <span>
 
 /**
 * Interface for string hashing functions.
@@ -24,9 +25,8 @@ public:
 	* Computes hash and stores it in the given buffer.
 	* @param out[out] buffer to store hash.
 	* @param in[in] input to be hashed
-	* @param inlen[in] length of the input
 	*/
-	virtual void hash(uint8_t* out, const uint8_t* in, uint64_t inlen) = 0;
+	virtual void hash(std::span<uint8_t> out, std::span<const uint8_t> in) = 0;
 };
 
 

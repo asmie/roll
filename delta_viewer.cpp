@@ -129,7 +129,7 @@ int main(int argc, char* argv[]) {
         std::cout << "  Signature: 0x" << std::hex << signature << std::dec << std::endl;
         std::cout << "  Chunk Size: " << chunkSize << " bytes" << std::endl;
         std::cout << "  Hash (first 8 bytes): ";
-        for (int i = 0; i < 8 && i < hash.size(); i++) {
+        for (size_t i = 0; i < 8 && i < hash.size(); i++) {
             std::cout << std::hex << std::setw(2) << std::setfill('0')
                       << (int)hash[i] << " ";
         }

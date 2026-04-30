@@ -8,9 +8,13 @@
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
+#include <bit>
+#include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <optional>
 #include <span>
+#include <utility>
 
 /**
 * Entry type for each delta record.
@@ -42,13 +46,9 @@ struct DeltaEntry {
 * - Proper error handling with Result structure
 * - Modular design with clear phases
 */
-template<class T, class U>
+template<RollingHashAlgorithm T, StrongHashAlgorithm U>
 class Delta {
 public:
-    static_assert(std::is_base_of<IRollingHash<typename T::RollingHashType>, T>::value,
-                  "T must derive from IRollingHash");
-    static_assert(std::is_base_of<IHash, U>::value, "U must derive from IHash");
-
     /**
     * Result of delta generation with error handling
     */
@@ -70,9 +70,9 @@ public:
     */
     Result generate_delta(const Signature<T, U>& original,
                          const Signature<T, U>& newfile,
-                         const std::string& oldfile,
-                         const std::string& file_to_check,
-                         const std::string& delta_file)
+                         const std::filesystem::path& oldfile,
+                         const std::filesystem::path& file_to_check,
+                         const std::filesystem::path& delta_file)
     {
         Result result{false, "", 0, 0};
 
@@ -141,18 +141,18 @@ private:
     * Open all required files with error handling
     */
     bool openFiles(FileIO& old, FileIO& file, FileIO& delta,
-                   const std::string& oldfile, const std::string& file_to_check,
-                   const std::string& delta_file, Result& result) {
+                   const std::filesystem::path& oldfile, const std::filesystem::path& file_to_check,
+                   const std::filesystem::path& delta_file, Result& result) {
         if (!old.open(oldfile, FileMode::IN)) {
-            result.error_message = "Failed to open old file: " + oldfile;
+            result.error_message = "Failed to open old file: " + oldfile.string();
             return false;
         }
         if (!file.open(file_to_check, FileMode::IN)) {
-            result.error_message = "Failed to open new file: " + file_to_check;
+            result.error_message = "Failed to open new file: " + file_to_check.string();
             return false;
         }
         if (!delta.open(delta_file, FileMode::OUT)) {
-            result.error_message = "Failed to create delta file: " + delta_file;
+            result.error_message = "Failed to create delta file: " + delta_file.string();
             return false;
         }
         return true;
@@ -354,10 +354,14 @@ private:
     * Helper to push 32-bit value as 4 bytes
     */
     void pushUint32(std::vector<uint8_t>& vec, uint32_t value) {
-        vec.push_back(value >> 24);
-        vec.push_back(value >> 16);
-        vec.push_back(value >> 8);
-        vec.push_back(value);
+        auto encoded = value;
+        if constexpr (std::endian::native == std::endian::little) {
+            encoded = std::byteswap(encoded);
+        }
+
+        for (const auto byte : std::as_bytes(std::span{&encoded, 1})) {
+            vec.push_back(std::to_integer<uint8_t>(byte));
+        }
     }
 
     /**
@@ -366,20 +370,20 @@ private:
     void writeDeltaEntry(FileIO& delta, const DeltaEntry<typename T::RollingHashType>& entry,
                         Result& result) {
         result.bytes_written += sizeof(uint64_t); // Entry type
-        delta.write_chunk(static_cast<uint64_t>(entry.type));
+        delta.write_chunk(static_cast<uint64_t>(std::to_underlying(entry.type)));
 
         result.bytes_written += sizeof(entry.chunk_data.signature);
         delta.write_chunk(entry.chunk_data.signature);
 
         result.bytes_written += entry.chunk_data.hash.size();
-        delta.write_chunk(const_cast<uint8_t*>(entry.chunk_data.hash.data()), entry.chunk_data.hash.size());
+        delta.write_chunk(entry.chunk_data.hash);
 
         result.bytes_written += sizeof(entry.chunk_data.chunk_size);
         delta.write_chunk(entry.chunk_data.chunk_size);
 
         if (entry.type == EntryType::ADDED_CHUNK || entry.type == EntryType::MODIFIED_CHUNK) {
             result.bytes_written += entry.chunk_data_raw.size();
-            delta.write_chunk(const_cast<uint8_t*>(entry.chunk_data_raw.data()), entry.chunk_data_raw.size());
+            delta.write_chunk(entry.chunk_data_raw);
         }
     }
 };

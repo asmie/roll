@@ -1,14 +1,13 @@
 #include "FileIO.hpp"
 
 #include <fstream>
-#include <string>
 
 FileIO::~FileIO()
 {
 	f_.close();
 }
 
-bool FileIO::open(const std::string& file_path, FileMode mode)
+bool FileIO::open(const std::filesystem::path& file_path, FileMode mode)
 {
 	std::fstream::openmode fmode = std::fstream::binary;
 
@@ -66,11 +65,16 @@ std::unique_ptr<std::vector<uint8_t>> FileIO::read_chunk(size_t chunk_size, size
 
 bool FileIO::write_chunk(std::unique_ptr<std::vector<uint8_t>> buffer)
 {
+	return write_chunk(*buffer);
+}
+
+bool FileIO::write_chunk(std::span<const uint8_t> chunk)
+{
 	try {
-		f_.write(reinterpret_cast<char*>(buffer->data()), buffer->size());
+		f_.write(reinterpret_cast<const char*>(chunk.data()), chunk.size());
 	}
 	catch (std::fstream::failure&) {}
-	
+
 	return f_.good();
 }
 
@@ -84,14 +88,8 @@ bool FileIO::write_chunk(uint64_t chunk)
 	return f_.good();
 }
 
-bool FileIO::write_chunk(uint8_t* chunk, size_t chunk_size)
+bool FileIO::write_chunk(const uint8_t* chunk, size_t chunk_size)
 {
-	try {
-		f_.write(reinterpret_cast<char*>(chunk), chunk_size);
-	}
-	catch (std::fstream::failure&) {}
-	
-	return f_.good();
+	return write_chunk(std::span<const uint8_t>{chunk, chunk_size});
 }
-
 

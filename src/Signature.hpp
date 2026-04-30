@@ -5,9 +5,17 @@
 #include "IRollingHash.hpp"
 #include "FileIO.hpp"
 
-#include <string>
+#include <filesystem>
 #include <vector>
-#include <type_traits>
+#include <concepts>
+
+template <class T>
+concept RollingHashAlgorithm =
+	requires { typename T::RollingHashType; } &&
+	std::derived_from<T, IRollingHash<typename T::RollingHashType>>;
+
+template <class U>
+concept StrongHashAlgorithm = std::derived_from<U, IHash>;
 
 /**
 * Structure representing signed chunk of data.
@@ -28,11 +36,8 @@ struct SignedChunk {
 * Signature class allowing generating signatures for specified file.
 * Class is template with two template parameters: the rolling hash algorithm and the hash algorithm.
 */
-template <class T, class U>
+template <RollingHashAlgorithm T, StrongHashAlgorithm U>
 class Signature {
-	static_assert(std::is_base_of<IRollingHash<typename T::RollingHashType>, T>::value, "T must derive from IRollingHash");
-	static_assert(std::is_base_of<IHash, U>::value, "U must derive from IHash");
-
 	static constexpr size_t MIN_CHUNK_SIZE = 512;     // Minimum chunk size in bytes
 	static constexpr size_t MAX_CHUNK_SIZE = 16384;   // Maximum chunk size in bytes (16KB)
 	static constexpr size_t TARGET_CHUNK_SIZE = 8192;  // Target average chunk size
@@ -43,7 +48,7 @@ public:
 	* Signatures are generated using provided rolling hash and hash algorithms.
 	* @param[in] datafile file with data for signatures to be generated
 	*/
-	void generate_signatures(const std::string& datafile) {
+	void generate_signatures(const std::filesystem::path& datafile) {
 		FileIO file;
 		T fingerprint;
 		U hash_func;
@@ -110,7 +115,7 @@ public:
 				SignedChunk<typename T::RollingHashType> schunk;
 				schunk.signature = current_fingerprint;
 				schunk.hash.resize(hash_func.get_hash_size());
-				hash_func.hash(schunk.hash.data(), chunk.data(), chunk.size());
+				hash_func.hash(schunk.hash, chunk);
 				schunk.start_offset = bytes_read - chunk.size();
 				schunk.chunk_size = chunk.size();
 				chunks.push_back(std::move(schunk));
@@ -124,7 +129,7 @@ public:
 			SignedChunk<typename T::RollingHashType> schunk;
 			schunk.signature = current_fingerprint;
 			schunk.hash.resize(hash_func.get_hash_size());
-			hash_func.hash(schunk.hash.data(), chunk.data(), chunk.size());
+			hash_func.hash(schunk.hash, chunk);
 			schunk.start_offset = bytes_read - chunk.size();
 			schunk.chunk_size = chunk.size();
 			chunks.push_back(std::move(schunk));
@@ -137,12 +142,12 @@ public:
 	* Get chunk list.
 	* @return Vector of signed chunks.
 	*/
-	const std::vector<struct SignedChunk<typename T::RollingHashType>>& get_chunks() const noexcept {
+	const std::vector<SignedChunk<typename T::RollingHashType>>& get_chunks() const noexcept {
 		return chunks;
 	}
 
 private:
-	std::vector<struct SignedChunk<typename T::RollingHashType>> chunks;
+	std::vector<SignedChunk<typename T::RollingHashType>> chunks;
 };
 
 
