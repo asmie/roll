@@ -5,270 +5,171 @@
 ![C++](https://img.shields.io/badge/C%2B%2B-23-blue.svg)
 ![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-brightgreen.svg)
 
-A high-performance C++23 application for generating binary deltas between files using content-defined chunking with Rabin fingerprints and BLAKE-512 hashing.
+`rolling_hash` is a C++23 command-line tool for generating binary deltas between
+two files. It uses content-defined chunking with Rabin-Karp rolling fingerprints
+for chunk boundaries and BLAKE-512 hashes for strong chunk identity checks.
 
-## 🎯 Features
+The project also includes:
 
-- **Content-Defined Chunking**: Dynamic chunk boundaries based on file content, not fixed positions
-- **Shift-Resistant**: Handles insertions and deletions efficiently without affecting surrounding chunks
-- **Dual Hashing**: Combines fast Rabin fingerprints with cryptographically strong BLAKE-512
-- **Adaptive Chunking**: Intelligent chunk size adaptation for optimal performance across file sizes
+- `apply_delta`: reconstructs a new file from an old file and a generated delta.
+- `delta_viewer`: prints a human-readable inspection of a binary delta file.
+- `rolling_hash_unit`: GoogleTest-based unit tests for hashing, file I/O,
+  signatures, delta application, and rolling fingerprints.
 
-## 📖 Table of Contents
+## Features
 
-- [Quick Start](#-quick-start)
-- [Installation](#-installation)
-- [Usage](#-usage)
-- [How It Works](#-how-it-works)
-- [Performance](#-performance)
-- [Testing](#-testing)
-- [Contributing](#-contributing)
-- [License](#-license)
+- Content-defined chunking, so insertions and deletions do not force every later
+  chunk to change.
+- Adaptive chunk boundaries with a 512 byte minimum, 16 KiB maximum, and an
+  8 KiB target average chunk size.
+- Dual chunk identity checks using a rolling fingerprint plus BLAKE-512.
+- Delta entries for original, added, modified, and removed chunks.
+- Delta application with payload hash verification and truncation/aliasing
+  checks.
 
-## 🚀 Quick Start
+## Requirements
+
+- CMake 3.16 or newer.
+- A C++23 compiler such as recent GCC, Clang, or MSVC.
+- Network access during first configure if GoogleTest is not already available,
+  because CMake fetches GoogleTest v1.14.0 for the test target.
+
+## Build
+
+Use an out-of-tree build directory:
 
 ```bash
-# Clone the repository
-git clone https://github.com/asmie/roll.git
-cd roll
-
-# Build the project
-mkdir build && cd build
-cmake .. && make -j4
-
-# Generate a delta between two files
-./rolling_hash oldfile.txt newfile.txt delta.bin
-```
-
-## 💻 Installation
-
-### Prerequisites
-
-- **Compiler**: GCC 11+, Clang 13+, or MSVC 2019+ with C++23 support
-- **Build System**: CMake 3.16 or newer
-- **Memory**: ~100MB for compilation
-- **Optional**: Google Test (automatically fetched if not found)
-
-### Building from Source
-
-#### Standard Build
-```bash
-mkdir build
+mkdir -p build
 cd build
 cmake ..
-make -j$(nproc)
+cmake --build . -j$(nproc)
 ```
 
-#### Debug Build
+For a specific build type:
+
 ```bash
-mkdir build-debug
-cd build-debug
-cmake -DCMAKE_BUILD_TYPE=Debug ..
-make -j$(nproc)
+cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-debug -j$(nproc)
+
+cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release
+cmake --build build-release -j$(nproc)
 ```
 
-#### Release Build with Optimizations
-```bash
-mkdir build-release
-cd build-release
-cmake -DCMAKE_BUILD_TYPE=Release ..
-make -j$(nproc)
-```
+On Windows with Visual Studio:
 
-#### Windows (Visual Studio)
 ```cmd
-mkdir build
-cd build
-cmake -G "Visual Studio 16 2019" ..
-cmake --build . --config Release
+cmake -S . -B build -G "Visual Studio 17 2022"
+cmake --build build --config Release
 ```
 
-## 📋 Usage
+## Usage
 
-### Basic Usage
+Generate a delta:
 
-Generate a delta file between two versions:
 ```bash
-./rolling_hash original.txt modified.txt changes.delta
+./rolling_hash oldfile.txt newfile.txt changes.delta
 ```
 
-### Understanding the Output
-
-The delta file is a **binary format** containing:
-- Chunk signatures (64-bit Rabin fingerprints)
-- BLAKE-512 hashes (64 bytes per chunk)
-- Chunk metadata (size, offset)
-- Binary diff data for modified chunks
-
-### Viewing Delta Contents
-
-A delta viewer utility is provided to inspect delta files:
+Apply a delta:
 
 ```bash
-# Build the delta viewer with the rest of the C++23 project
+./apply_delta oldfile.txt changes.delta reconstructed.txt
+```
+
+Inspect a delta:
+
+```bash
 cmake --build . --target delta_viewer
-
-# View delta file contents
 ./delta_viewer changes.delta
 ```
 
-Example output:
-```
-Delta File Viewer - Analyzing: changes.delta
-========================================
+The delta file is a binary stream of chunk records. Each record stores an entry
+type, rolling signature, BLAKE-512 hash, chunk size, and optional payload data for
+added or modified chunks.
 
-Chunk #1:
-  Type: MODIFIED
-  Signature: 0x7cf82b36
-  Chunk Size: 1012 bytes
-  Hash (first 8 bytes): f7 7d 84 02 04 ee 91 fd ...
-  Modifications:
-    Modify byte at position 172 to 0x4e ('N')
-    Modify byte at position 173 to 0x45 ('E')
-    ... and 158 more changes
-```
+## Example
 
-## 🔬 How It Works
-
-### Algorithm Overview
-
-1. **Chunking Phase**
-   - Files are divided into variable-sized chunks using a rolling hash window
-   - Chunk boundaries occur when the hash matches specific criteria
-   - Adaptive sizing: 512 bytes (min) to 16KB (max)
-
-2. **Signature Generation**
-   - Each chunk gets a Rabin fingerprint (fast, weak hash)
-   - Each chunk gets a BLAKE-512 hash (slow, strong hash)
-   - Creates a signature list for each file
-
-3. **Delta Computation**
-   - Compares chunk lists between original and new files
-   - Identifies: unchanged, added, removed, and modified chunks
-   - For modified chunks, generates byte-level diffs
-
-4. **Output Generation**
-   - Writes binary delta file with all changes
-   - Optimized format for minimal size and fast application
-
-### Chunking Strategy
-
-The application uses **content-defined chunking** with adaptive boundaries:
-
-```cpp
-// Adaptive boundary detection based on chunk size
-if (chunk.size() >= MAX_CHUNK_SIZE) {
-    // Force boundary at maximum size
-    boundary_found = true;
-} else if (chunk.size() >= MIN_CHUNK_SIZE) {
-    // Use adaptive mask based on current size
-    uint32_t mask = chunk.size() < 2048 ? 0x1FF :    // 1/512 probability
-                    chunk.size() < 4096 ? 0x7FF :    // 1/2048 probability
-                                          0x1FFF;     // 1/8192 probability
-    boundary_found = (((last << 8 | b) & mask) == 0);
-}
-```
-
-This approach ensures:
-- Small files generate appropriate chunks
-- Large files maintain efficiency
-- Chunk boundaries remain content-dependent
-
-## 📊 Performance
-
-### Benchmarks
-
-| File Size | Chunk Count | Delta Generation | Memory Usage |
-|-----------|-------------|------------------|--------------|
-| 1 KB      | 1-2         | < 1ms           | ~1 MB        |
-| 100 KB    | 10-20       | ~5ms            | ~2 MB        |
-| 10 MB     | 500-1000    | ~100ms          | ~15 MB       |
-| 1 GB      | 50K-100K    | ~10s            | ~500 MB      |
-
-### Optimization Features
-
-- **Minimized Memory Allocation**: Smart pointer usage
-- **Efficient I/O**: Buffered reading with configurable chunk sizes
-- **Parallel-Ready**: Thread-safe design for future parallelization
-- **Cache-Friendly**: Sequential memory access patterns
-
-## 🧪 Testing
-
-### Running Unit Tests
+From the repository root:
 
 ```bash
-# Build and run all tests
-make rolling_hash_unit
+printf "hello\nold line\n" > old.txt
+printf "hello\nnew line\n" > new.txt
+
+cmake -S . -B build
+cmake --build build -j$(nproc)
+
+./build/rolling_hash old.txt new.txt changes.delta
+./build/apply_delta old.txt changes.delta reconstructed.txt
+cmp new.txt reconstructed.txt
+```
+
+If `cmp` exits successfully, the reconstructed file matches the new file.
+
+## How It Works
+
+1. `Signature` reads each input file and splits it into variable-sized chunks.
+2. Every chunk receives a Rabin-Karp rolling fingerprint and a BLAKE-512 hash.
+3. `Delta` compares the old and new signatures, emitting records for reused,
+   added, modified, and removed chunks.
+4. Modified chunks store compact byte-level diff opcodes:
+   - `D`: replace bytes at a position.
+   - `I`: insert bytes at a position.
+   - `X`: delete bytes at a position.
+5. `Apply` reads the old file and delta records in target-file order, verifies
+   hashes for generated payloads, and writes the reconstructed output.
+
+The delta format is native-endian for 64-bit entry fields and big-endian for
+32-bit diff opcode positions/lengths. Treat generated deltas as an internal
+format for matching builds unless compatibility is explicitly versioned.
+
+## Tests
+
+Build and run the GoogleTest suite:
+
+```bash
+cd build
+ctest --output-on-failure
 ./rolling_hash_unit
-
-# Run tests with detailed output
-./rolling_hash_unit --gtest_verbose
 ```
 
-### Test Coverage
+The current test suite covers:
 
-- **Unit Tests**: 20+ test cases covering all major components
-- **Memory Tests**: Valgrind verified (no leaks)
-- **Integration Tests**: Full pipeline testing with various file types
+- File opening, reading, writing, EOF behavior, and invalid paths.
+- BLAKE-512 hashing.
+- Signature generation.
+- Rabin-Karp rolling fingerprint behavior.
+- Delta application for identical files, empty inputs, append/truncate cases,
+  in-chunk modifications, malformed deltas, and output alias protection.
 
-### Memory Testing
+## Project Layout
 
-```bash
-valgrind --leak-check=full ./rolling_hash file1.txt file2.txt delta.out
+```text
+src/
+  main.cpp          rolling_hash CLI entry point
+  Apply.hpp         delta application logic
+  Delta.hpp         delta generation and binary record writing
+  Signature.hpp     content-defined chunk signature generation
+  RK_finger.hpp     Rabin-Karp rolling fingerprint implementation
+  FileIO.*          file I/O helper
+  blake.*           BLAKE-512 implementation
+tests/
+  *_tests.cpp       GoogleTest unit tests
+apply_delta.cpp     apply_delta CLI entry point
+delta_viewer.cpp    delta inspection utility
+CMakeLists.txt      build and test configuration
 ```
 
+## Development
 
-## 🤝 Contributing
+Keep changes warning-clean under the CMake options in `CMakeLists.txt`
+(`-Wall -Wextra` for non-MSVC builds, `/W4` for MSVC). Add focused tests under
+`tests/` when changing file I/O, chunking, hashing, delta generation, or delta
+application behavior.
 
-We welcome contributions! Please follow these guidelines:
+## License
 
-### Development Setup
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+## Author
 
-### Code Style
-
-- Use descriptive variable names
-- Follow existing formatting (tabs for indentation)
-- Add comments for complex logic
-- Include unit tests for new features
-- Update documentation as needed
-
-### Testing Requirements
-
-- All tests must pass
-- No memory leaks (Valgrind clean)
-- No compiler warnings
-- Code coverage for new features
-
-## 🐛 Bug Reporting
-
-Found a bug? Please report it on the [GitHub issue tracker](https://github.com/asmie/roll/issues) with:
-- Description of the issue
-- Steps to reproduce
-- Expected vs actual behavior
-- System information (OS, compiler version)
-- Sample files if applicable
-
-## 📜 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 👨‍💻 Authors
-
-- **Piotr Olszewski** - *Initial work* - [asmie](https://github.com/asmie)
-
-## 🙏 Acknowledgments
-
-- BLAKE hash implementation from the public domain reference
-- Inspired by rsync's rolling checksum algorithm
-- Content-defined chunking concepts from LBFS
-
-## 📈 Project Status
-
-![Version](https://img.shields.io/badge/Version-0.0.2-blue.svg)
-![Status](https://img.shields.io/badge/Status-Active-green.svg)
+Piotr Olszewski ([asmie](https://github.com/asmie))
