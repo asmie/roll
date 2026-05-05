@@ -42,14 +42,17 @@ public:
 
 	/**
 	* Close previously opened file.
+	* @return True if the file closed cleanly (any pending writes flushed),
+	*         false if a flush or close error occurred. Existing callers may
+	*         discard the return value.
 	*/
-	void close();
+	bool close();
 
 	/**
 	* Read single byte from stream.
-	* @return Byte read from stream.
+	* @return Byte value (0..255) or EOF (-1) if no byte is available.
 	*/
-	uint8_t read_byte();
+	int read_byte();
 
 	/**
 	* Write single byte to stream.
@@ -57,6 +60,12 @@ public:
 	* @return True if byte was written successfully, false otherwise.
 	*/
 	bool write_byte(uint8_t byte);
+
+	/**
+	* Peek single byte from stream without consuming it.
+	* @return Byte value (0..255) or EOF (-1) if no byte is available.
+	*/
+	int peek_byte();
 	
 	/**
 	* Read multiple bytes from stream.

@@ -62,6 +62,10 @@ target_link_libraries(${PROJECT_NAME} Threads::Threads ${ADDITIONAL_LIBRARIES})
 add_executable(delta_viewer delta_viewer.cpp)
 target_compile_features(delta_viewer PRIVATE cxx_std_23)
 
+add_executable(apply_delta ${SOURCES} apply_delta.cpp)
+target_compile_features(apply_delta PRIVATE cxx_std_23)
+target_link_libraries(apply_delta Threads::Threads ${ADDITIONAL_LIBRARIES})
+
 # Testing time
 enable_testing()
 

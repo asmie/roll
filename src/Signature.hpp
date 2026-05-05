@@ -44,27 +44,36 @@ class Signature {
 
 public:
 	/**
-	* Generate signatures for specified file and keep it in the object.
-	* Signatures are generated using provided rolling hash and hash algorithms.
+	* Generate signatures by opening the given path and processing its contents.
 	* @param[in] datafile file with data for signatures to be generated
 	*/
 	void generate_signatures(const std::filesystem::path& datafile) {
 		FileIO file;
-		T fingerprint;
-		U hash_func;
-		size_t bytes_read{ 0 };
+		if (!file.open(datafile, FileMode::IN))
+			return;
+		generate_signatures(file);
+	}
 
-		file.open(datafile, FileMode::IN);
-
+	/**
+	* Generate signatures by reading from an already-open FileIO. Data is read
+	* from offset 0; the file position at return is unspecified. The FileIO is
+	* not closed by this call.
+	* @param[in] file open FileIO to read from
+	*/
+	void generate_signatures(FileIO& file) {
 		if (!file.is_open())
 			return;
 
-		auto res = file.read_chunk(fingerprint.get_window_size());
-		if (res.get() == nullptr)											// There was no data in file
-			return; 
-		
+		T fingerprint;
+		U hash_func;
+		size_t bytes_read = 0;
+
+		auto res = file.read_chunk(fingerprint.get_window_size(), 0);
+		if (res->empty())
+			return;
+
 		fingerprint.initialize(*res);
-		bytes_read += res.get()->size();
+		bytes_read += res->size();
 
 		std::vector<uint8_t> chunk(*res);
 		res.reset();
@@ -72,25 +81,30 @@ public:
 
 		bool init = false;
 
-		while (!file.is_eof())
+		while (true)
 		{
-			if (init)														// init rolling hash for each chunk
+			if (init)														// init rolling hash for next chunk
 			{
 				res = file.read_chunk(fingerprint.get_window_size());
-				fingerprint.initialize(*res);								// *res can't be null here as there is at least 1 byte in file
-				bytes_read += res.get()->size();
+				if (res->empty())
+					break;
+				fingerprint.initialize(*res);
+				bytes_read += res->size();
 				chunk = *res;
 				res.reset();
 
 				init = false;
 			}
-			
-			auto b = file.read_byte();
-			bytes_read++;
-			uint8_t last = chunk.back();
-			chunk.push_back(b);
 
-			current_fingerprint = fingerprint.compute_next(b);
+			int b = file.read_byte();
+			if (b == EOF)
+				break;
+			bytes_read++;
+			uint8_t byte = static_cast<uint8_t>(b);
+			uint8_t last = chunk.back();
+			chunk.push_back(byte);
+
+			current_fingerprint = fingerprint.compute_next(byte);
 
 			// Adaptive boundary detection based on chunk size
 			bool boundary_found = false;
@@ -107,7 +121,7 @@ public:
 				} else {
 					mask = 0x1FFF; // 1/8192 probability for large chunks
 				}
-				boundary_found = (((last << 8 | b) & mask) == 0);
+				boundary_found = (((last << 8 | byte) & mask) == 0);
 			}
 
 			if (boundary_found)					// chunk boundary found
@@ -124,7 +138,7 @@ public:
 			}
 		}
 
-		if (chunk.size() > 0)									// Get rid of the last elements in file
+		if (chunk.size() > 0)									// emit residual chunk at EOF
 		{
 			SignedChunk<typename T::RollingHashType> schunk;
 			schunk.signature = current_fingerprint;
@@ -134,8 +148,6 @@ public:
 			schunk.chunk_size = chunk.size();
 			chunks.push_back(std::move(schunk));
 		}
-
-		file.close();
 	}
 
 	/**

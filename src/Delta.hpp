@@ -186,64 +186,44 @@ private:
     }
 
     /**
-    * Process multiple chunks with optimized algorithm
-    *
-    * Uses 4-phase approach:
-    * 1. Match identical chunks at same positions (O(n))
-    * 2. Find moved chunks using hash map (O(n))
-    * 3. Handle modifications and additions (O(n))
-    * 4. Process removed chunks (O(n))
+    * Emit delta entries in target (new-file) order, followed by REMOVED entries
+    * for any unmatched old chunks. This ordering lets the applier append each
+    * entry directly to the output without reordering.
     */
     void processMultipleChunks(const std::vector<SignedChunk<typename T::RollingHashType>>& original_chunks,
                                const std::vector<SignedChunk<typename T::RollingHashType>>& new_chunks,
                                const ChunkMap& chunk_map,
                                FileIO& old, FileIO& file, FileIO& delta, Result& result) {
         std::vector<bool> original_used(original_chunks.size(), false);
-        std::vector<bool> new_processed(new_chunks.size(), false);
 
-        // Phase 1: Match identical chunks at same positions
-        size_t min_size = std::min(original_chunks.size(), new_chunks.size());
-        for (size_t i = 0; i < min_size; ++i) {
-            if (original_chunks[i] == new_chunks[i]) {
-                DeltaEntry<typename T::RollingHashType> entry;
-                entry.type = EntryType::ORIGINAL_CHUNK;
-                entry.chunk_data = original_chunks[i];
-                writeDeltaEntry(delta, entry, result);
-
-                original_used[i] = true;
-                new_processed[i] = true;
-                result.chunks_processed++;
-            }
-        }
-
-        // Phase 2: Find moved chunks using hash map (O(1) lookup)
         for (size_t i = 0; i < new_chunks.size(); ++i) {
-            if (new_processed[i]) continue;
-
-            auto it = chunk_map.find(new_chunks[i]);
-            if (it != chunk_map.end() && !original_used[it->second]) {
-                // Chunk moved from different position
-                DeltaEntry<typename T::RollingHashType> entry;
-                entry.type = EntryType::ORIGINAL_CHUNK;
-                entry.chunk_data = new_chunks[i];
-                writeDeltaEntry(delta, entry, result);
-
-                original_used[it->second] = true;
-                new_processed[i] = true;
-                result.chunks_processed++;
-            }
-        }
-
-        // Phase 3: Handle modifications and additions
-        for (size_t i = 0; i < new_chunks.size(); ++i) {
-            if (new_processed[i]) continue;
-
             DeltaEntry<typename T::RollingHashType> entry;
 
-            // Check if this is a modification of nearby chunk
+            // Identical chunk at same position.
+            if (i < original_chunks.size() && !original_used[i] &&
+                original_chunks[i] == new_chunks[i]) {
+                entry.type = EntryType::ORIGINAL_CHUNK;
+                entry.chunk_data = original_chunks[i];
+                original_used[i] = true;
+                writeDeltaEntry(delta, entry, result);
+                result.chunks_processed++;
+                continue;
+            }
+
+            // Moved match: same content located elsewhere in old.
+            auto it = chunk_map.find(new_chunks[i]);
+            if (it != chunk_map.end() && !original_used[it->second]) {
+                entry.type = EntryType::ORIGINAL_CHUNK;
+                entry.chunk_data = new_chunks[i];
+                original_used[it->second] = true;
+                writeDeltaEntry(delta, entry, result);
+                result.chunks_processed++;
+                continue;
+            }
+
+            // Modification of the same-position old chunk, otherwise an addition.
             bool is_modification = false;
             if (i < original_chunks.size() && !original_used[i]) {
-                // Likely a modification of the chunk at same position
                 entry.type = EntryType::MODIFIED_CHUNK;
                 entry.chunk_data = new_chunks[i];
 
@@ -260,7 +240,6 @@ private:
             }
 
             if (!is_modification) {
-                // New chunk added
                 entry.type = EntryType::ADDED_CHUNK;
                 entry.chunk_data = new_chunks[i];
 
@@ -275,7 +254,7 @@ private:
             result.chunks_processed++;
         }
 
-        // Phase 4: Handle removed chunks
+        // Removed chunks: any old chunk not consumed above.
         for (size_t i = 0; i < original_chunks.size(); ++i) {
             if (!original_used[i]) {
                 DeltaEntry<typename T::RollingHashType> entry;
@@ -337,14 +316,16 @@ private:
             pushUint32(diff, old_data.size() - i);
         }
 
-        if (j < new_data.size()) {
-            // Additions
+        // Additions: emit one or more 'I' opcodes since count is u8-bounded.
+        while (j < new_data.size()) {
+            size_t count = std::min(size_t(255), new_data.size() - j);
             diff.push_back('I');
             pushUint32(diff, j);
-            diff.push_back(static_cast<uint8_t>(std::min(size_t(255), new_data.size() - j)));
-            for (size_t k = j; k < new_data.size() && k - j < 255; ++k) {
-                diff.push_back(new_data[k]);
+            diff.push_back(static_cast<uint8_t>(count));
+            for (size_t k = 0; k < count; ++k) {
+                diff.push_back(new_data[j + k]);
             }
+            j += count;
         }
 
         return diff;
