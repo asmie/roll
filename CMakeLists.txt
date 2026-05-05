@@ -6,8 +6,8 @@ project(rolling_hash)
 
 # Versioning
 set (RH_VERSION_MAJOR 0)
-set (RH_VERSION_MINOR 0)
-set (RH_VERSION_REV 2)
+set (RH_VERSION_MINOR 1)
+set (RH_VERSION_REV 0)
 set (RH_VERSION "${RH_VERSION_MAJOR}.${RH_VERSION_MINOR}.${RH_VERSION_REV}" )
 
 # Configuration
