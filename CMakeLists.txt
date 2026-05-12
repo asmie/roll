@@ -70,10 +70,10 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(googletest)
 
-enable_testing()
+include(GoogleTest)
 include_directories(src ${CMAKE_CURRENT_BINARY_DIR}/generated)
 file(GLOB TEST_SOURCES tests/*.cpp ${SOURCES} )
 add_executable(${PROJECT_NAME}_unit ${TEST_SOURCES})
 target_compile_features(${PROJECT_NAME}_unit PRIVATE cxx_std_23)
 target_link_libraries(${PROJECT_NAME}_unit PUBLIC gtest_main pthread ${CMAKE_DL_LIBS} ${ADDITIONAL_LIBRARIES})
-add_test(${PROJECT_NAME}_unit_test ${PROJECT_NAME}_unit)
+gtest_discover_tests(${PROJECT_NAME}_unit)
