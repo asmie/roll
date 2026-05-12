@@ -5,16 +5,19 @@
 ![C++](https://img.shields.io/badge/C%2B%2B-23-blue.svg)
 ![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-brightgreen.svg)
 
-`rolling_hash` is a C++23 command-line tool for generating binary deltas between
-two files. It uses content-defined chunking with Rabin-Karp rolling fingerprints
-for chunk boundaries and BLAKE-512 hashes for strong chunk identity checks.
+`rolling_hash` is a C++23 command-line tool for generating, applying, and
+inspecting binary deltas between two files. It uses content-defined chunking
+with Rabin-Karp rolling fingerprints for chunk boundaries and BLAKE-512 hashes
+for strong chunk identity checks.
 
-The project also includes:
+The single `rolling_hash` binary exposes three subcommands:
 
-- `apply_delta`: reconstructs a new file from an old file and a generated delta.
-- `delta_viewer`: prints a human-readable inspection of a binary delta file.
-- `rolling_hash_unit`: GoogleTest-based unit tests for hashing, file I/O,
-  signatures, delta application, and rolling fingerprints.
+- `create`: generate a delta from an old file and a new file.
+- `apply`: reconstruct a new file from an old file and a delta.
+- `view`: print a human-readable inspection of a delta file.
+
+The project also ships `rolling_hash_unit`, a GoogleTest-based suite covering
+hashing, file I/O, signatures, delta application, and rolling fingerprints.
 
 ## Features
 
@@ -67,20 +70,19 @@ cmake --build build --config Release
 Generate a delta:
 
 ```bash
-./rolling_hash oldfile.txt newfile.txt changes.delta
+./rolling_hash create oldfile.txt newfile.txt changes.delta
 ```
 
 Apply a delta:
 
 ```bash
-./apply_delta oldfile.txt changes.delta reconstructed.txt
+./rolling_hash apply oldfile.txt changes.delta reconstructed.txt
 ```
 
 Inspect a delta:
 
 ```bash
-cmake --build . --target delta_viewer
-./delta_viewer changes.delta
+./rolling_hash view changes.delta
 ```
 
 The delta file is a binary stream of chunk records. Each record stores an entry
@@ -98,8 +100,8 @@ printf "hello\nnew line\n" > new.txt
 cmake -S . -B build
 cmake --build build -j$(nproc)
 
-./build/rolling_hash old.txt new.txt changes.delta
-./build/apply_delta old.txt changes.delta reconstructed.txt
+./build/rolling_hash create old.txt new.txt changes.delta
+./build/rolling_hash apply old.txt changes.delta reconstructed.txt
 cmp new.txt reconstructed.txt
 ```
 
@@ -145,17 +147,16 @@ The current test suite covers:
 
 ```text
 src/
-  main.cpp          rolling_hash CLI entry point
+  main.cpp          rolling_hash CLI entry point and subcommand dispatcher
   Apply.hpp         delta application logic
   Delta.hpp         delta generation and binary record writing
   Signature.hpp     content-defined chunk signature generation
   RK_finger.hpp     Rabin-Karp rolling fingerprint implementation
+  DeltaViewer.*     delta inspection command implementation
   FileIO.*          file I/O helper
   blake.*           BLAKE-512 implementation
 tests/
   *_tests.cpp       GoogleTest unit tests
-apply_delta.cpp     apply_delta CLI entry point
-delta_viewer.cpp    delta inspection utility
 CMakeLists.txt      build and test configuration
 ```
 
