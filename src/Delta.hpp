@@ -18,17 +18,6 @@
 #include <vector>
 
 /**
-* Entry type for each delta record.
-* Each record represent original, added, modified or removed chunk.
-*/
-enum class EntryType : uint8_t {
-    ORIGINAL_CHUNK = 0,
-    ADDED_CHUNK = 1,
-    MODIFIED_CHUNK = 2,
-    REMOVED_CHUNK = 3
-};
-
-/**
 * Structure representing single delta record.
 */
 template <class T>

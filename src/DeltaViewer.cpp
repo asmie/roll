@@ -16,21 +16,14 @@
 
 namespace {
 
-enum class EntryType : uint64_t {
-	ORIGINAL_CHUNK = 0,
-	ADDED_CHUNK = 1,
-	MODIFIED_CHUNK = 2,
-	REMOVED_CHUNK = 3
-};
-
 const char* entryTypeToString(EntryType type) {
 	switch (type) {
 		case EntryType::ORIGINAL_CHUNK: return "ORIGINAL";
 		case EntryType::ADDED_CHUNK:    return "ADDED";
 		case EntryType::MODIFIED_CHUNK: return "MODIFIED";
 		case EntryType::REMOVED_CHUNK:  return "REMOVED";
-		default:                        return "UNKNOWN";
 	}
+	return "UNKNOWN";
 }
 
 bool readExact(std::ifstream& file, void* out, std::streamsize size) {
@@ -194,7 +187,7 @@ int view_delta(const std::filesystem::path& delta_file) {
 		return 1;
 	}
 
-	constexpr size_t hashSize = 64; // BLAKE-512
+	constexpr size_t hashSize = 64; // delta v1 ⇒ BLAKE-512
 	int chunkNum = 0;
 	while (true) {
 		if (file.peek() == EOF) break;
@@ -234,12 +227,12 @@ int view_delta(const std::filesystem::path& delta_file) {
 		          << " (" << entryType << ")" << std::endl;
 		std::cout << "  Signature: 0x" << std::hex << signature << std::dec << std::endl;
 		std::cout << "  Chunk Size: " << chunkSize << " bytes" << std::endl;
-		std::cout << "  Hash (first 8 bytes): ";
-		for (size_t i = 0; i < 8 && i < hash.size(); i++) {
+		std::cout << "  Hash: ";
+		for (size_t i = 0; i < hash.size(); i++) {
 			std::cout << std::hex << std::setw(2) << std::setfill('0')
-			          << (int)hash[i] << " ";
+			          << static_cast<int>(hash[i]);
 		}
-		std::cout << "..." << std::dec << std::endl;
+		std::cout << std::dec << std::endl;
 
 		if (entryType == static_cast<uint64_t>(EntryType::ADDED_CHUNK)) {
 			if (chunkSize > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
