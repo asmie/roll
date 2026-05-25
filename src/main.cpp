@@ -12,12 +12,20 @@
 
 namespace {
 
-void print_usage(const char* prog)
+void print_version(const char* prog)
 {
-	std::cout << "Usage:" << std::endl;
-	std::cout << "  " << prog << " create <oldfile> <newfile> <delta>" << std::endl;
-	std::cout << "  " << prog << " apply  <oldfile> <delta> <outfile>" << std::endl;
-	std::cout << "  " << prog << " view   <delta>" << std::endl;
+	std::cout << prog << " v" << RH_VERSION_MAJOR << "." << RH_VERSION_MINOR
+	          << "." << RH_VERSION_REV << std::endl;
+}
+
+void print_usage(const char* prog, std::ostream& os = std::cerr)
+{
+	os << "Usage:\n"
+	   << "  " << prog << " create <oldfile> <newfile> <delta>\n"
+	   << "  " << prog << " apply  <oldfile> <delta> <outfile>\n"
+	   << "  " << prog << " view   <delta>\n"
+	   << "  " << prog << " --version\n"
+	   << "  " << prog << " --help\n";
 }
 
 int run_create(const char* old_path, const char* new_path, const char* delta_path)
@@ -63,9 +71,6 @@ int run_apply(const char* old_path, const char* delta_path, const char* out_path
 
 int main(int argc, const char** argv)
 {
-	std::cout << argv[0] << " v. " << RH_VERSION_MAJOR << "." << RH_VERSION_MINOR
-	          << "." << RH_VERSION_REV << std::endl;
-
 	if (argc < 2) {
 		print_usage(argv[0]);
 		return 1;
@@ -73,27 +78,28 @@ int main(int argc, const char** argv)
 
 	const std::string_view command{argv[1]};
 
+	if (command == "--version" || command == "-v") {
+		print_version(argv[0]);
+		return 0;
+	}
+
+	if (command == "--help" || command == "-h") {
+		print_usage(argv[0], std::cout);
+		return 0;
+	}
+
 	if (command == "create") {
-		if (argc != 5) {
-			print_usage(argv[0]);
-			return 1;
-		}
+		if (argc != 5) { print_usage(argv[0]); return 1; }
 		return run_create(argv[2], argv[3], argv[4]);
 	}
 
 	if (command == "apply") {
-		if (argc != 5) {
-			print_usage(argv[0]);
-			return 1;
-		}
+		if (argc != 5) { print_usage(argv[0]); return 1; }
 		return run_apply(argv[2], argv[3], argv[4]);
 	}
 
 	if (command == "view") {
-		if (argc != 3) {
-			print_usage(argv[0]);
-			return 1;
-		}
+		if (argc != 3) { print_usage(argv[0]); return 1; }
 		return view_delta(argv[2]);
 	}
 
