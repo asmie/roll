@@ -89,17 +89,21 @@ public:
         auto chunk_map = buildChunkMap(original_chunks);
 
         // Process chunks with optimized algorithm
+        bool ok;
         if (original_chunks.size() == 1 && new_chunks.size() == 1) {
-            processSingleChunkFiles(original_chunks[0], new_chunks[0], old, file, delta, result);
+            ok = processSingleChunkFiles(original_chunks[0], new_chunks[0], old, file, delta, result);
         } else {
-            processMultipleChunks(original_chunks, new_chunks, chunk_map, old, file, delta, result);
+            ok = processMultipleChunks(original_chunks, new_chunks, chunk_map, old, file, delta, result);
         }
 
         old.close();
         file.close();
-        delta.close();
+        if (!delta.close()) {
+            result.error_message = "Failed to flush delta file";
+            return result;
+        }
 
-        result.success = true;
+        result.success = ok;
         return result;
     }
 
@@ -161,7 +165,7 @@ private:
     /**
     * Process single chunk files
     */
-    void processSingleChunkFiles(const SignedChunk<typename T::RollingHashType>& old_chunk,
+    bool processSingleChunkFiles(const SignedChunk<typename T::RollingHashType>& old_chunk,
                                  const SignedChunk<typename T::RollingHashType>& new_chunk,
                                  FileIO& old, FileIO& file, FileIO& delta, Result& result) {
         DeltaEntry<typename T::RollingHashType> entry;
@@ -181,8 +185,10 @@ private:
             }
         }
 
-        writeDeltaEntry(delta, entry, result);
+        if (!writeDeltaEntry(delta, entry, result))
+            return false;
         result.chunks_processed = 1;
+        return true;
     }
 
     /**
@@ -190,7 +196,7 @@ private:
     * for any unmatched old chunks. This ordering lets the applier append each
     * entry directly to the output without reordering.
     */
-    void processMultipleChunks(const std::vector<SignedChunk<typename T::RollingHashType>>& original_chunks,
+    bool processMultipleChunks(const std::vector<SignedChunk<typename T::RollingHashType>>& original_chunks,
                                const std::vector<SignedChunk<typename T::RollingHashType>>& new_chunks,
                                const ChunkMap& chunk_map,
                                FileIO& old, FileIO& file, FileIO& delta, Result& result) {
@@ -205,7 +211,7 @@ private:
                 entry.type = EntryType::ORIGINAL_CHUNK;
                 entry.chunk_data = original_chunks[i];
                 original_used[i] = true;
-                writeDeltaEntry(delta, entry, result);
+                if (!writeDeltaEntry(delta, entry, result)) return false;
                 result.chunks_processed++;
                 continue;
             }
@@ -216,7 +222,7 @@ private:
                 entry.type = EntryType::ORIGINAL_CHUNK;
                 entry.chunk_data = new_chunks[i];
                 original_used[it->second] = true;
-                writeDeltaEntry(delta, entry, result);
+                if (!writeDeltaEntry(delta, entry, result)) return false;
                 result.chunks_processed++;
                 continue;
             }
@@ -250,7 +256,7 @@ private:
                 }
             }
 
-            writeDeltaEntry(delta, entry, result);
+            if (!writeDeltaEntry(delta, entry, result)) return false;
             result.chunks_processed++;
         }
 
@@ -260,10 +266,11 @@ private:
                 DeltaEntry<typename T::RollingHashType> entry;
                 entry.type = EntryType::REMOVED_CHUNK;
                 entry.chunk_data = original_chunks[i];
-                writeDeltaEntry(delta, entry, result);
+                if (!writeDeltaEntry(delta, entry, result)) return false;
                 result.chunks_processed++;
             }
         }
+        return true;
     }
 
     /**
@@ -348,24 +355,40 @@ private:
     /**
     * Write delta entry to file
     */
-    void writeDeltaEntry(FileIO& delta, const DeltaEntry<typename T::RollingHashType>& entry,
+    bool writeDeltaEntry(FileIO& delta, const DeltaEntry<typename T::RollingHashType>& entry,
                         Result& result) {
-        result.bytes_written += sizeof(uint64_t); // Entry type
-        delta.write_chunk(static_cast<uint64_t>(std::to_underlying(entry.type)));
+        if (!delta.write_chunk(static_cast<uint64_t>(std::to_underlying(entry.type)))) {
+            result.error_message = "Failed to write entry type";
+            return false;
+        }
+        result.bytes_written += sizeof(uint64_t);
 
+        if (!delta.write_chunk(entry.chunk_data.signature)) {
+            result.error_message = "Failed to write signature";
+            return false;
+        }
         result.bytes_written += sizeof(entry.chunk_data.signature);
-        delta.write_chunk(entry.chunk_data.signature);
 
+        if (!delta.write_chunk(entry.chunk_data.hash)) {
+            result.error_message = "Failed to write hash";
+            return false;
+        }
         result.bytes_written += entry.chunk_data.hash.size();
-        delta.write_chunk(entry.chunk_data.hash);
 
+        if (!delta.write_chunk(entry.chunk_data.chunk_size)) {
+            result.error_message = "Failed to write chunk size";
+            return false;
+        }
         result.bytes_written += sizeof(entry.chunk_data.chunk_size);
-        delta.write_chunk(entry.chunk_data.chunk_size);
 
         if (entry.type == EntryType::ADDED_CHUNK || entry.type == EntryType::MODIFIED_CHUNK) {
+            if (!delta.write_chunk(entry.chunk_data_raw)) {
+                result.error_message = "Failed to write payload";
+                return false;
+            }
             result.bytes_written += entry.chunk_data_raw.size();
-            delta.write_chunk(entry.chunk_data_raw);
         }
+        return true;
     }
 };
 
