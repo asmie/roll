@@ -33,3 +33,9 @@
 
 # Build directories
 build/
+cmake-build-*/
+
+# IDE
+.idea/
+.vscode/
+.codex

@@ -44,8 +44,22 @@ configure_file (
   )
 
 
-# Find source files
-file(GLOB SOURCES src/blake512.cpp src/FileIO.cpp src/DeltaViewer.cpp )
+# Production sources (explicit list — new files require re-running CMake anyway,
+# so spelling them out avoids the well-known file(GLOB) staleness problem).
+set(RH_SOURCES
+    src/blake512.cpp
+    src/FileIO.cpp
+    src/DeltaViewer.cpp
+)
+
+set(RH_TEST_SOURCES
+    tests/Apply_tests.cpp
+    tests/Blake_tests.cpp
+    tests/FileIO_tests.cpp
+    tests/RK_finger_tests.cpp
+    tests/Signature_tests.cpp
+    tests/main_tests.cpp
+)
 
 # Include header files
 include_directories(src ${CMAKE_CURRENT_BINARY_DIR}/generated)
@@ -55,7 +69,7 @@ include_directories(src ${CMAKE_CURRENT_BINARY_DIR}/generated)
 find_package(Threads REQUIRED)
 
 # Create executable
-add_executable(${PROJECT_NAME} ${SOURCES} src/main.cpp)
+add_executable(${PROJECT_NAME} ${RH_SOURCES} src/main.cpp)
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_23)
 target_link_libraries(${PROJECT_NAME} Threads::Threads ${ADDITIONAL_LIBRARIES})
 
@@ -71,9 +85,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(googletest)
 
 include(GoogleTest)
-include_directories(src ${CMAKE_CURRENT_BINARY_DIR}/generated)
-file(GLOB TEST_SOURCES tests/*.cpp ${SOURCES} )
-add_executable(${PROJECT_NAME}_unit ${TEST_SOURCES})
+add_executable(${PROJECT_NAME}_unit ${RH_TEST_SOURCES} ${RH_SOURCES})
 target_compile_features(${PROJECT_NAME}_unit PRIVATE cxx_std_23)
 target_link_libraries(${PROJECT_NAME}_unit PUBLIC gtest_main pthread ${CMAKE_DL_LIBS} ${ADDITIONAL_LIBRARIES})
 gtest_discover_tests(${PROJECT_NAME}_unit)
