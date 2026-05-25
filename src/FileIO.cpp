@@ -80,11 +80,7 @@ bool FileIO::write_chunk(std::unique_ptr<std::vector<uint8_t>> buffer)
 
 bool FileIO::write_chunk(std::span<const uint8_t> chunk)
 {
-	try {
-		f_.write(reinterpret_cast<const char*>(chunk.data()), chunk.size());
-	}
-	catch (std::fstream::failure&) {}
-
+	f_.write(reinterpret_cast<const char*>(chunk.data()), chunk.size());
 	return f_.good();
 }
 
@@ -93,11 +89,7 @@ bool FileIO::write_chunk(uint64_t chunk)
 	if constexpr (std::endian::native == std::endian::little)
 		chunk = std::byteswap(chunk);
 
-	try {
-		f_.write(reinterpret_cast<const char*>(&chunk), sizeof(chunk));
-	}
-	catch (std::fstream::failure&) {}
-
+	f_.write(reinterpret_cast<const char*>(&chunk), sizeof(chunk));
 	return f_.good();
 }
 
