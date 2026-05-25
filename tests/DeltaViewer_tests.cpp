@@ -1,0 +1,160 @@
+#include "gtest/gtest.h"
+
+#include "Apply.hpp"
+#include "Delta.hpp"
+#include "DeltaFormat.hpp"
+#include "DeltaViewer.hpp"
+#include "RK_finger.hpp"
+#include "Signature.hpp"
+#include "blake.h"
+
+#include <atomic>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <random>
+#include <string>
+#include <vector>
+
+namespace {
+
+std::string viewer_path(const char* name)
+{
+	static std::atomic<unsigned> counter{0};
+	const auto p = std::filesystem::temp_directory_path() /
+	               ("roll_viewer_" + std::to_string(counter++) + "_" + name);
+	return p.string();
+}
+
+void write_bytes(const std::string& path, const std::vector<uint8_t>& bytes)
+{
+	std::ofstream f(path, std::ios::binary);
+	if (!bytes.empty())
+		f.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+}
+
+std::vector<uint8_t> read_all(const std::string& path)
+{
+	std::ifstream f(path, std::ios::binary | std::ios::ate);
+	if (!f) return {};
+	const auto size = f.tellg();
+	f.seekg(0);
+	std::vector<uint8_t> buf(static_cast<size_t>(size));
+	if (size > 0)
+		f.read(reinterpret_cast<char*>(buf.data()), buf.size());
+	return buf;
+}
+
+void write_random(const std::string& path, size_t bytes, uint32_t seed)
+{
+	std::mt19937 rng(seed);
+	std::uniform_int_distribution<int> dist(0, 255);
+	std::ofstream f(path, std::ios::binary);
+	for (size_t i = 0; i < bytes; ++i)
+		f.put(static_cast<char>(dist(rng)));
+}
+
+// Redirect std::cout/std::cerr to /dev/null for the duration of the call so
+// view_delta's normal output doesn't pollute the test runner's log.
+struct SilenceCout {
+	std::streambuf* old_cout;
+	std::streambuf* old_cerr;
+	std::ofstream sink;
+	SilenceCout() : sink("/dev/null", std::ios::out) {
+		old_cout = std::cout.rdbuf(sink.rdbuf());
+		old_cerr = std::cerr.rdbuf(sink.rdbuf());
+	}
+	~SilenceCout() {
+		std::cout.rdbuf(old_cout);
+		std::cerr.rdbuf(old_cerr);
+	}
+};
+
+} // namespace
+
+TEST(DeltaViewer, succeeds_on_well_formed_delta)
+{
+	const std::string OLD = viewer_path("old");
+	const std::string NEW = viewer_path("new");
+	const std::string DELTA = viewer_path("delta");
+
+	write_random(OLD, 4096, 0x1234u);
+	write_random(NEW, 4096, 0x5678u);
+	Signature<RKFinger, BLAKE512> os, ns;
+	os.generate_signatures(OLD);
+	ns.generate_signatures(NEW);
+	Delta<RKFinger, BLAKE512> d;
+	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
+	ASSERT_TRUE(dr.success);
+
+	SilenceCout s;
+	EXPECT_EQ(view_delta(DELTA), 0);
+
+	std::remove(OLD.c_str());
+	std::remove(NEW.c_str());
+	std::remove(DELTA.c_str());
+}
+
+TEST(DeltaViewer, rejects_missing_file)
+{
+	SilenceCout s;
+	EXPECT_NE(view_delta(viewer_path("no_such_file")), 0);
+}
+
+TEST(DeltaViewer, rejects_bad_magic)
+{
+	const std::string OLD = viewer_path("badmagic_old");
+	const std::string NEW = viewer_path("badmagic_new");
+	const std::string DELTA = viewer_path("badmagic_delta");
+
+	write_random(OLD, 4096, 0xAAu);
+	write_random(NEW, 4096, 0xBBu);
+	Signature<RKFinger, BLAKE512> os, ns;
+	os.generate_signatures(OLD);
+	ns.generate_signatures(NEW);
+	Delta<RKFinger, BLAKE512> d;
+	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
+	ASSERT_TRUE(dr.success);
+
+	auto raw = read_all(DELTA);
+	raw[0] ^= 0xFF;
+	write_bytes(DELTA, raw);
+
+	SilenceCout s;
+	EXPECT_NE(view_delta(DELTA), 0);
+
+	std::remove(OLD.c_str());
+	std::remove(NEW.c_str());
+	std::remove(DELTA.c_str());
+}
+
+TEST(DeltaViewer, rejects_unknown_version)
+{
+	const std::string OLD = viewer_path("badver_old");
+	const std::string NEW = viewer_path("badver_new");
+	const std::string DELTA = viewer_path("badver_delta");
+
+	write_random(OLD, 4096, 0xC1u);
+	write_random(NEW, 4096, 0xC2u);
+	Signature<RKFinger, BLAKE512> os, ns;
+	os.generate_signatures(OLD);
+	ns.generate_signatures(NEW);
+	Delta<RKFinger, BLAKE512> d;
+	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
+	ASSERT_TRUE(dr.success);
+
+	// Bump the version field (BE u32 at offset 4) to a value we don't know.
+	auto raw = read_all(DELTA);
+	raw[sizeof(DELTA_MAGIC) + 0] = 0xFF;
+	raw[sizeof(DELTA_MAGIC) + 1] = 0xFF;
+	raw[sizeof(DELTA_MAGIC) + 2] = 0xFF;
+	raw[sizeof(DELTA_MAGIC) + 3] = 0xFE;
+	write_bytes(DELTA, raw);
+
+	SilenceCout s;
+	EXPECT_NE(view_delta(DELTA), 0);
+
+	std::remove(OLD.c_str());
+	std::remove(NEW.c_str());
+	std::remove(DELTA.c_str());
+}

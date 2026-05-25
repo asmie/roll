@@ -2,6 +2,7 @@
 
 #include "Apply.hpp"
 #include "Delta.hpp"
+#include "DeltaFormat.hpp"
 #include "RK_finger.hpp"
 #include "Signature.hpp"
 #include "blake.h"
@@ -474,6 +475,77 @@ TEST(Apply, duplicate_removed_entry_rejected)
 	ASSERT_GE(raw.size(), header_size);
 	// Append a copy of the last REMOVED entry — duplicate consumption attempt.
 	raw.insert(raw.end(), raw.end() - header_size, raw.end());
+	write_bytes(DELTA, raw);
+
+	Apply<RKFinger, BLAKE512> apply;
+	auto ar = apply.apply_delta(OLD, DELTA, OUT);
+	EXPECT_FALSE(ar.success);
+
+	cleanup({OLD, NEW, DELTA, OUT});
+}
+
+TEST(Apply, rejects_mutated_old_between_create_and_apply)
+{
+	// Generate a delta against an old file, then change a byte in the old
+	// before applying. The regenerated signature in Apply will produce
+	// different chunks for the changed region, so ORIGINAL entries from the
+	// delta will fail to find a match. (Worst case for unchanged chunking,
+	// MODIFIED reconstruction's hash check still rejects.)
+	const std::string OLD = tpath("apply_t_old_mutated_old");
+	const std::string NEW = tpath("apply_t_old_mutated_new");
+	const std::string DELTA = tpath("apply_t_old_mutated_delta");
+	const std::string OUT = tpath("apply_t_old_mutated_out");
+
+	write_random(OLD, 32 * 1024, 0xF1u);
+	auto base = read_all(OLD);
+	auto modified = base;
+	modified[10000] ^= 0x55;
+	write_bytes(NEW, modified);
+
+	Signature<RKFinger, BLAKE512> os, ns;
+	os.generate_signatures(OLD);
+	ns.generate_signatures(NEW);
+	Delta<RKFinger, BLAKE512> d;
+	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
+	ASSERT_TRUE(dr.success);
+
+	// Tamper with the OLD file after the delta is produced.
+	auto tampered = base;
+	tampered[5000] ^= 0xAA;
+	write_bytes(OLD, tampered);
+
+	Apply<RKFinger, BLAKE512> apply;
+	auto ar = apply.apply_delta(OLD, DELTA, OUT);
+	EXPECT_FALSE(ar.success);
+
+	cleanup({OLD, NEW, DELTA, OUT});
+}
+
+TEST(Apply, rejects_corrupted_original_hash)
+{
+	// Generate a delta of identical files (all-ORIGINAL entries) and corrupt
+	// one byte inside the first entry's hash field. findUnusedMatch must not
+	// find a chunk with that bogus hash → apply rejects.
+	const std::string OLD = tpath("apply_t_corr_hash_old");
+	const std::string NEW = tpath("apply_t_corr_hash_new");
+	const std::string DELTA = tpath("apply_t_corr_hash_delta");
+	const std::string OUT = tpath("apply_t_corr_hash_out");
+
+	write_random(OLD, 32 * 1024, 0x55u);
+	write_random(NEW, 32 * 1024, 0x55u);  // same seed -> identical content
+
+	Signature<RKFinger, BLAKE512> os, ns;
+	os.generate_signatures(OLD);
+	ns.generate_signatures(NEW);
+	Delta<RKFinger, BLAKE512> d;
+	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
+	ASSERT_TRUE(dr.success);
+
+	// Header (8) + entry_type (8) + signature (8) lands us at the hash bytes.
+	auto raw = read_all(DELTA);
+	const size_t hash_offset = DELTA_HEADER_SIZE + 2 * sizeof(uint64_t);
+	ASSERT_GT(raw.size(), hash_offset);
+	raw[hash_offset] ^= 0xFF;
 	write_bytes(DELTA, raw);
 
 	Apply<RKFinger, BLAKE512> apply;
