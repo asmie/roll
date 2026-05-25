@@ -6,12 +6,12 @@
 #include "gtest/gtest.h"
 
 #include "RK_finger.hpp"
-#include "blake.h"
+#include "blake2b.h"
 #include "Signature.hpp"
 
 TEST(Signature, generate_signature_null)
 {
-	Signature<RKFinger, BLAKE512> signatures;
+	Signature<RKFinger, BLAKE2b> signatures;
 
 	signatures.generate_signatures("");
 	auto chunks = signatures.get_chunks();
@@ -20,7 +20,7 @@ TEST(Signature, generate_signature_null)
 
 TEST(Signature, generate_signature_incorrect)
 {
-	Signature<RKFinger, BLAKE512> signatures;
+	Signature<RKFinger, BLAKE2b> signatures;
 
 	signatures.generate_signatures("non-existing-file");
 	auto chunks = signatures.get_chunks();
@@ -29,7 +29,7 @@ TEST(Signature, generate_signature_incorrect)
 
 TEST(Signature, generate_signature)
 {
-	Signature<RKFinger, BLAKE512> signatures;
+	Signature<RKFinger, BLAKE2b> signatures;
 
 	signatures.generate_signatures("../tests/testfile");
 
@@ -72,7 +72,7 @@ TEST(Signature, small_file_under_window)
 		data[i] = static_cast<uint8_t>(i * 13u + 7u);
 	write_tmp(path, data);
 
-	Signature<RKFinger, BLAKE512> a, b;
+	Signature<RKFinger, BLAKE2b> a, b;
 	a.generate_signatures(path);
 	b.generate_signatures(path);
 
@@ -104,7 +104,7 @@ TEST(Signature, shift_invariance_resyncs_after_insertion)
 	write_tmp(p_data, data);
 	write_tmp(p_shift, shifted);
 
-	Signature<RKFinger, BLAKE512> a, b;
+	Signature<RKFinger, BLAKE2b> a, b;
 	a.generate_signatures(p_data);
 	b.generate_signatures(p_shift);
 
@@ -145,7 +145,7 @@ TEST(Signature, regenerate_replaces_previous_chunks)
 	write_tmp(p1, a);
 	write_tmp(p2, b);
 
-	Signature<RKFinger, BLAKE512> sig;
+	Signature<RKFinger, BLAKE2b> sig;
 	sig.generate_signatures(p1);
 	const size_t first_count = sig.get_chunks().size();
 	ASSERT_GT(first_count, 0u);
@@ -171,7 +171,7 @@ TEST(Signature, small_file_distinct_signatures)
 	write_tmp(p1, a);
 	write_tmp(p2, b);
 
-	Signature<RKFinger, BLAKE512> sa, sb;
+	Signature<RKFinger, BLAKE2b> sa, sb;
 	sa.generate_signatures(p1);
 	sb.generate_signatures(p2);
 

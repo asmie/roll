@@ -6,7 +6,7 @@
 #include "DeltaViewer.hpp"
 #include "RK_finger.hpp"
 #include "Signature.hpp"
-#include "blake.h"
+#include "blake2b.h"
 
 #include <atomic>
 #include <cstdio>
@@ -80,10 +80,10 @@ TEST(DeltaViewer, succeeds_on_well_formed_delta)
 
 	write_random(OLD, 4096, 0x1234u);
 	write_random(NEW, 4096, 0x5678u);
-	Signature<RKFinger, BLAKE512> os, ns;
+	Signature<RKFinger, BLAKE2b> os, ns;
 	os.generate_signatures(OLD);
 	ns.generate_signatures(NEW);
-	Delta<RKFinger, BLAKE512> d;
+	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
 	ASSERT_TRUE(dr.success);
 
@@ -109,10 +109,10 @@ TEST(DeltaViewer, rejects_bad_magic)
 
 	write_random(OLD, 4096, 0xAAu);
 	write_random(NEW, 4096, 0xBBu);
-	Signature<RKFinger, BLAKE512> os, ns;
+	Signature<RKFinger, BLAKE2b> os, ns;
 	os.generate_signatures(OLD);
 	ns.generate_signatures(NEW);
-	Delta<RKFinger, BLAKE512> d;
+	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
 	ASSERT_TRUE(dr.success);
 
@@ -136,10 +136,10 @@ TEST(DeltaViewer, rejects_unknown_version)
 
 	write_random(OLD, 4096, 0xC1u);
 	write_random(NEW, 4096, 0xC2u);
-	Signature<RKFinger, BLAKE512> os, ns;
+	Signature<RKFinger, BLAKE2b> os, ns;
 	os.generate_signatures(OLD);
 	ns.generate_signatures(NEW);
-	Delta<RKFinger, BLAKE512> d;
+	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
 	ASSERT_TRUE(dr.success);
 

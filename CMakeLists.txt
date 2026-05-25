@@ -51,7 +51,7 @@ configure_file (
 # Production sources (explicit list — new files require re-running CMake anyway,
 # so spelling them out avoids the well-known file(GLOB) staleness problem).
 set(RH_SOURCES
-    src/blake512.cpp
+    src/blake2b.cpp
     src/FileIO.cpp
     src/DeltaViewer.cpp
 )

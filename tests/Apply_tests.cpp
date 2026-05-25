@@ -5,7 +5,7 @@
 #include "DeltaFormat.hpp"
 #include "RK_finger.hpp"
 #include "Signature.hpp"
-#include "blake.h"
+#include "blake2b.h"
 
 #include <atomic>
 #include <cstdint>
@@ -25,7 +25,7 @@ namespace {
 //   D-op    = 'D' | pos:u32 BE | count:u8 | count bytes
 inline size_t entry_header_size()
 {
-	return 3 * sizeof(uint64_t) + BLAKE512().get_hash_size();
+	return 3 * sizeof(uint64_t) + BLAKE2b().get_hash_size();
 }
 
 constexpr size_t d_opcode_size(size_t inline_count)
@@ -81,18 +81,18 @@ bool roundtrip(const std::string& old_path, const std::string& new_path,
                const std::string& delta_path, const std::string& out_path,
                std::string* err = nullptr)
 {
-	Signature<RKFinger, BLAKE512> old_sig, new_sig;
+	Signature<RKFinger, BLAKE2b> old_sig, new_sig;
 	old_sig.generate_signatures(old_path);
 	new_sig.generate_signatures(new_path);
 
-	Delta<RKFinger, BLAKE512> delta;
+	Delta<RKFinger, BLAKE2b> delta;
 	auto dr = delta.generate_delta(old_sig, new_sig, old_path, new_path, delta_path);
 	if (!dr.success) {
 		if (err) *err = "delta: " + dr.error_message;
 		return false;
 	}
 
-	Apply<RKFinger, BLAKE512> apply;
+	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(old_path, delta_path, out_path);
 	if (!ar.success) {
 		if (err) *err = "apply: " + ar.error_message;
@@ -287,10 +287,10 @@ TEST(Apply, truncated_added_payload_fails)
 	write_bytes(OLD, {});
 	write_random(NEW, 4096, 0x123456u);
 
-	Signature<RKFinger, BLAKE512> os, ns;
+	Signature<RKFinger, BLAKE2b> os, ns;
 	os.generate_signatures(OLD);
 	ns.generate_signatures(NEW);
-	Delta<RKFinger, BLAKE512> d;
+	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
 	ASSERT_TRUE(dr.success);
 
@@ -302,7 +302,7 @@ TEST(Apply, truncated_added_payload_fails)
 	raw.pop_back();
 	write_bytes(DELTA, raw);
 
-	Apply<RKFinger, BLAKE512> apply;
+	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
 	EXPECT_FALSE(ar.success);
 
@@ -329,10 +329,10 @@ TEST(Apply, truncated_modified_after_header_fails)
 	modified[100] = 0x99;
 	write_bytes(NEW, modified);
 
-	Signature<RKFinger, BLAKE512> os, ns;
+	Signature<RKFinger, BLAKE2b> os, ns;
 	os.generate_signatures(OLD);
 	ns.generate_signatures(NEW);
-	Delta<RKFinger, BLAKE512> d;
+	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
 	ASSERT_TRUE(dr.success);
 
@@ -342,7 +342,7 @@ TEST(Apply, truncated_modified_after_header_fails)
 	raw.resize(header_size);  // header only, no diff opcodes
 	write_bytes(DELTA, raw);
 
-	Apply<RKFinger, BLAKE512> apply;
+	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
 	EXPECT_FALSE(ar.success);
 
@@ -370,10 +370,10 @@ TEST(Apply, truncated_modified_at_opcode_boundary_fails)
 	modified[200] = 0x77;
 	write_bytes(NEW, modified);
 
-	Signature<RKFinger, BLAKE512> os, ns;
+	Signature<RKFinger, BLAKE2b> os, ns;
 	os.generate_signatures(OLD);
 	ns.generate_signatures(NEW);
-	Delta<RKFinger, BLAKE512> d;
+	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
 	ASSERT_TRUE(dr.success);
 
@@ -384,7 +384,7 @@ TEST(Apply, truncated_modified_at_opcode_boundary_fails)
 	raw.resize(cut);
 	write_bytes(DELTA, raw);
 
-	Apply<RKFinger, BLAKE512> apply;
+	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
 	EXPECT_FALSE(ar.success);
 
@@ -400,16 +400,16 @@ TEST(Apply, rejects_output_aliasing_old)
 	write_random(OLD, 4096, 0xA1u);
 	write_random(NEW, 4096, 0xA2u);
 
-	Signature<RKFinger, BLAKE512> os, ns;
+	Signature<RKFinger, BLAKE2b> os, ns;
 	os.generate_signatures(OLD);
 	ns.generate_signatures(NEW);
-	Delta<RKFinger, BLAKE512> d;
+	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
 	ASSERT_TRUE(dr.success);
 
 	auto old_before = read_all(OLD);
 
-	Apply<RKFinger, BLAKE512> apply;
+	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OLD);  // output == old
 	EXPECT_FALSE(ar.success);
 
@@ -428,16 +428,16 @@ TEST(Apply, rejects_output_aliasing_delta)
 	write_random(OLD, 4096, 0xB1u);
 	write_random(NEW, 4096, 0xB2u);
 
-	Signature<RKFinger, BLAKE512> os, ns;
+	Signature<RKFinger, BLAKE2b> os, ns;
 	os.generate_signatures(OLD);
 	ns.generate_signatures(NEW);
-	Delta<RKFinger, BLAKE512> d;
+	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
 	ASSERT_TRUE(dr.success);
 
 	auto delta_before = read_all(DELTA);
 
-	Apply<RKFinger, BLAKE512> apply;
+	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, DELTA);  // output == delta
 	EXPECT_FALSE(ar.success);
 
@@ -463,10 +463,10 @@ TEST(Apply, duplicate_removed_entry_rejected)
 	write_random(OLD, 4096, 0xD1u);
 	write_bytes(NEW, {});
 
-	Signature<RKFinger, BLAKE512> os, ns;
+	Signature<RKFinger, BLAKE2b> os, ns;
 	os.generate_signatures(OLD);
 	ns.generate_signatures(NEW);
-	Delta<RKFinger, BLAKE512> d;
+	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
 	ASSERT_TRUE(dr.success);
 
@@ -477,7 +477,7 @@ TEST(Apply, duplicate_removed_entry_rejected)
 	raw.insert(raw.end(), raw.end() - header_size, raw.end());
 	write_bytes(DELTA, raw);
 
-	Apply<RKFinger, BLAKE512> apply;
+	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
 	EXPECT_FALSE(ar.success);
 
@@ -502,10 +502,10 @@ TEST(Apply, rejects_mutated_old_between_create_and_apply)
 	modified[10000] ^= 0x55;
 	write_bytes(NEW, modified);
 
-	Signature<RKFinger, BLAKE512> os, ns;
+	Signature<RKFinger, BLAKE2b> os, ns;
 	os.generate_signatures(OLD);
 	ns.generate_signatures(NEW);
-	Delta<RKFinger, BLAKE512> d;
+	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
 	ASSERT_TRUE(dr.success);
 
@@ -514,7 +514,7 @@ TEST(Apply, rejects_mutated_old_between_create_and_apply)
 	tampered[5000] ^= 0xAA;
 	write_bytes(OLD, tampered);
 
-	Apply<RKFinger, BLAKE512> apply;
+	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
 	EXPECT_FALSE(ar.success);
 
@@ -534,10 +534,10 @@ TEST(Apply, rejects_corrupted_original_hash)
 	write_random(OLD, 32 * 1024, 0x55u);
 	write_random(NEW, 32 * 1024, 0x55u);  // same seed -> identical content
 
-	Signature<RKFinger, BLAKE512> os, ns;
+	Signature<RKFinger, BLAKE2b> os, ns;
 	os.generate_signatures(OLD);
 	ns.generate_signatures(NEW);
-	Delta<RKFinger, BLAKE512> d;
+	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
 	ASSERT_TRUE(dr.success);
 
@@ -548,7 +548,7 @@ TEST(Apply, rejects_corrupted_original_hash)
 	raw[hash_offset] ^= 0xFF;
 	write_bytes(DELTA, raw);
 
-	Apply<RKFinger, BLAKE512> apply;
+	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
 	EXPECT_FALSE(ar.success);
 
@@ -565,10 +565,10 @@ TEST(Apply, failed_apply_removes_output_stub)
 	write_random(OLD, 2048, 0xE1u);
 	write_random(NEW, 2048, 0xE2u);
 
-	Signature<RKFinger, BLAKE512> os, ns;
+	Signature<RKFinger, BLAKE2b> os, ns;
 	os.generate_signatures(OLD);
 	ns.generate_signatures(NEW);
-	Delta<RKFinger, BLAKE512> d;
+	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
 	ASSERT_TRUE(dr.success);
 
@@ -577,7 +577,7 @@ TEST(Apply, failed_apply_removes_output_stub)
 	raw[0] ^= 0xFF;
 	write_bytes(DELTA, raw);
 
-	Apply<RKFinger, BLAKE512> apply;
+	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
 	EXPECT_FALSE(ar.success);
 	EXPECT_FALSE(std::filesystem::exists(OUT))
@@ -596,10 +596,10 @@ TEST(Apply, rejects_bad_magic)
 	write_random(OLD, 4096, 0xD1u);
 	write_random(NEW, 4096, 0xD2u);
 
-	Signature<RKFinger, BLAKE512> os, ns;
+	Signature<RKFinger, BLAKE2b> os, ns;
 	os.generate_signatures(OLD);
 	ns.generate_signatures(NEW);
-	Delta<RKFinger, BLAKE512> d;
+	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
 	ASSERT_TRUE(dr.success);
 
@@ -608,7 +608,7 @@ TEST(Apply, rejects_bad_magic)
 	raw[0] ^= 0xFF;  // corrupt the magic
 	write_bytes(DELTA, raw);
 
-	Apply<RKFinger, BLAKE512> apply;
+	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
 	EXPECT_FALSE(ar.success);
 
@@ -627,10 +627,10 @@ TEST(Apply, truncated_partial_header_fails)
 	write_random(OLD, 4096, 0x99EEu);
 	write_bytes(NEW, {});
 
-	Signature<RKFinger, BLAKE512> os, ns;
+	Signature<RKFinger, BLAKE2b> os, ns;
 	os.generate_signatures(OLD);
 	ns.generate_signatures(NEW);
-	Delta<RKFinger, BLAKE512> d;
+	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
 	ASSERT_TRUE(dr.success);
 
@@ -641,7 +641,7 @@ TEST(Apply, truncated_partial_header_fails)
 	raw.push_back(0x03);
 	write_bytes(DELTA, raw);
 
-	Apply<RKFinger, BLAKE512> apply;
+	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
 	EXPECT_FALSE(ar.success);
 

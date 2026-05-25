@@ -8,7 +8,7 @@
 #include "DeltaViewer.hpp"
 #include "RK_finger.hpp"
 #include "Signature.hpp"
-#include "blake.h"
+#include "blake2b.h"
 
 namespace {
 
@@ -30,8 +30,8 @@ void print_usage(const char* prog, std::ostream& os = std::cerr)
 
 int run_create(const char* old_path, const char* new_path, const char* delta_path)
 {
-	Signature<RKFinger, BLAKE512> old_signature;
-	Signature<RKFinger, BLAKE512> new_signature;
+	Signature<RKFinger, BLAKE2b> old_signature;
+	Signature<RKFinger, BLAKE2b> new_signature;
 
 	if (!old_signature.generate_signatures(old_path)) {
 		std::cerr << "Failed to read old file: " << old_path << std::endl;
@@ -42,7 +42,7 @@ int run_create(const char* old_path, const char* new_path, const char* delta_pat
 		return 1;
 	}
 
-	Delta<RKFinger, BLAKE512> delta;
+	Delta<RKFinger, BLAKE2b> delta;
 	auto result = delta.generate_delta(old_signature, new_signature, old_path, new_path, delta_path);
 
 	if (!result.success) {
@@ -54,7 +54,7 @@ int run_create(const char* old_path, const char* new_path, const char* delta_pat
 
 int run_apply(const char* old_path, const char* delta_path, const char* out_path)
 {
-	Apply<RKFinger, BLAKE512> apply;
+	Apply<RKFinger, BLAKE2b> apply;
 	auto result = apply.apply_delta(old_path, delta_path, out_path);
 
 	if (!result.success) {
