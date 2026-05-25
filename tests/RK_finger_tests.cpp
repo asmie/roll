@@ -19,17 +19,37 @@ TEST(RKfinger, initialize_incorrect)
 	EXPECT_EQ(rk.initialize(init), false);
 }
 
-TEST(RKfinger, compute_next)
+TEST(RKfinger, compute_next_matches_fresh_initialize)
 {
-	RKFinger rk;
+	// Rolling forward N bytes must yield the same fingerprint as initializing
+	// fresh on the shifted window. This is the defining property of a rolling
+	// hash and is independent of any specific modulus/alphabet choice.
+	std::vector<uint8_t> data(WINDOW_DEF_SIZE * 2);
+	for (size_t i = 0; i < data.size(); ++i)
+		data[i] = static_cast<uint8_t>(i * 37u + 13u);
 
-	std::vector<uint8_t> init(48, 0xBE);
+	RKFinger rolled;
+	ASSERT_TRUE(rolled.initialize(std::span<const uint8_t>{data.data(), WINDOW_DEF_SIZE}));
+	for (size_t i = WINDOW_DEF_SIZE; i < data.size(); ++i)
+		rolled.compute_next(data[i]);
 
-	rk.initialize(init);
-	EXPECT_EQ(rk.compute_next(10), 758716516);
-	EXPECT_EQ(rk.compute_next(10), 957899876);
-	EXPECT_EQ(rk.compute_next(255), 409232753);
-	EXPECT_EQ(rk.compute_next(99), 1684369811);
+	RKFinger fresh;
+	ASSERT_TRUE(fresh.initialize(std::span<const uint8_t>{
+		data.data() + (data.size() - WINDOW_DEF_SIZE), WINDOW_DEF_SIZE}));
+
+	EXPECT_EQ(rolled.get_current_fingerprint(), fresh.get_current_fingerprint());
+}
+
+TEST(RKfinger, compute_next_distinguishes_content)
+{
+	std::vector<uint8_t> a(WINDOW_DEF_SIZE, 0xBE);
+	std::vector<uint8_t> b(WINDOW_DEF_SIZE, 0xBE);
+	b[WINDOW_DEF_SIZE / 2] ^= 0x01;
+
+	RKFinger ra, rb;
+	ASSERT_TRUE(ra.initialize(a));
+	ASSERT_TRUE(rb.initialize(b));
+	EXPECT_NE(ra.get_current_fingerprint(), rb.get_current_fingerprint());
 }
 
 TEST(RKfinger, get_alphabet_size)
@@ -62,14 +82,12 @@ TEST(RKfinger, default_params)
 	EXPECT_EQ(rk.get_modulus(), INT_MAX);
 }
 
-TEST(RKfinger, get_current_fingerprint)
+TEST(RKfinger, get_current_fingerprint_tracks_compute_next)
 {
 	RKFinger rk;
+	std::vector<uint8_t> init(WINDOW_DEF_SIZE, 0xBE);
 
-	std::vector<uint8_t> init(48, 0xBE);
-
-	rk.initialize(init);
-	EXPECT_EQ(rk.compute_next(10), 758716516);
-
-	EXPECT_EQ(rk.get_current_fingerprint(), 758716516);
+	ASSERT_TRUE(rk.initialize(init));
+	const uint64_t after_roll = rk.compute_next(10);
+	EXPECT_EQ(rk.get_current_fingerprint(), after_roll);
 }

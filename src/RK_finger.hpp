@@ -3,39 +3,33 @@
 
 #include "IRollingHash.hpp"
 
-#include <vector>
 #include <cstdint>
 #include <climits>
 #include <span>
+#include <vector>
 
 constexpr unsigned int ALPHABET_DEF_SIZE = 256;
 constexpr unsigned int WINDOW_DEF_SIZE = 48;
 
 /**
-* RKFinger is a class that implements the Rabin fingerprints.
-* It is used to fingerprint a given data using rolling hash approach (compute_next).
-* 
-* Class has only primitive types so moving and copying can be done using default copy constructor and assignment operator.
-* 
+* Rabin-Karp rolling fingerprint over a sliding window of bytes.
 */
 class RKFinger : public IRollingHash<uint64_t> {
 public:
-	RKFinger() = default;
-	RKFinger(unsigned int alphabet_size, unsigned int window_size, uint64_t modulus) 
+	RKFinger() { init_state(); }
+	RKFinger(unsigned int alphabet_size, unsigned int window_size, uint64_t modulus)
 		: alphabet_size_(alphabet_size), window_size_(window_size), modulus_(modulus) {
-		for (unsigned int i = 0; i < window_size_ - 1; i++)
-			h_ = (h_ * alphabet_size_) % modulus_;
+		init_state();
 	}
-	
+
 	RKFinger(const RKFinger& other) = default;
 	RKFinger(RKFinger&& other) = default;
 	RKFinger& operator=(const RKFinger& other) = default;
 	RKFinger& operator=(RKFinger&& other) = default;
-	
+
 	/**
-	* Computes initial hash value.
-	* Can be used to clear current hash and initialize RKFinger object with new data.
-	* @param initial[in] initial data to be hashed - must be at least window_size length (but still only window_size bytes will be used).
+	* Computes initial hash value and seeds the sliding window.
+	* @param initial[in] initial data to be hashed - must be at least window_size length.
 	* @return True if init was successful, otherwise false (if initial data is too short).
 	*/
 	bool initialize(std::span<const uint8_t> initial) noexcept override {
@@ -43,64 +37,48 @@ public:
 			return false;
 
 		fingerprint_ = 0;
-		last_byte = initial[window_size_-1];  // Use the last byte of the window, not the vector
-	
-		for (unsigned int i = 0; i < window_size_; i++)
+		for (unsigned int i = 0; i < window_size_; i++) {
+			window_[i] = initial[i];
 			fingerprint_ = (alphabet_size_ * fingerprint_ + initial[i]) % modulus_;
+		}
+		window_head_ = 0;
 		return true;
 	}
 
 	/**
-	* Compute the next hash value for the given data.
-	* @param[in] data the data byte to be hashed.
-	* @return the new rolling hash value.
+	* Roll the fingerprint one byte forward: evict the oldest byte of the window
+	* and append the new one.
 	*/
 	uint64_t compute_next(uint8_t byte) noexcept override {
-		// Add modulus before subtraction to prevent underflow
-		fingerprint_ = (alphabet_size_ * ((fingerprint_ + modulus_) - (last_byte * h_) % modulus_) + byte) % modulus_;
-		last_byte = byte;
+		const uint8_t evicted = window_[window_head_];
+		fingerprint_ = (alphabet_size_ * ((fingerprint_ + modulus_) - (evicted * h_) % modulus_) + byte) % modulus_;
+		window_[window_head_] = byte;
+		window_head_ = (window_head_ + 1) % window_size_;
 		return fingerprint_;
 	}
 
-	/**
-	* Get alphabet size.
-	* @return Alphabet size.
-	*/
-	unsigned int get_alphabet_size() const override {
-		return alphabet_size_;
-	}
-	
-	/**
-	* Return rolling hash window size.
-	* @return Window size.
-	*/
-	unsigned int get_window_size() const override {
-		return window_size_;
-	}
+	unsigned int get_alphabet_size() const override { return alphabet_size_; }
+	unsigned int get_window_size() const override { return window_size_; }
+	uint64_t get_modulus() const { return modulus_; }
+	uint64_t get_current_fingerprint() const override { return fingerprint_; }
 
-	/**
-	* Return modulus.
-	* @return Modulus.
-	*/
-	uint64_t get_modulus() const {
-		return modulus_;
-	}
-
-	/**
-	* Get current rolling hash value.
-	* @return Current rolling hash value.
-	*/
-	uint64_t get_current_fingerprint() const override {
-		return fingerprint_;
-	}
-	
 private:
+	void init_state() {
+		window_.assign(window_size_, 0);
+		window_head_ = 0;
+		fingerprint_ = 0;
+		h_ = 1;
+		for (unsigned int i = 0; i < window_size_ - 1; i++)
+			h_ = (h_ * alphabet_size_) % modulus_;
+	}
+
 	unsigned int alphabet_size_ { ALPHABET_DEF_SIZE };			/*!< Possible alphabet size */
 	unsigned int window_size_ { WINDOW_DEF_SIZE };				/*!< Window size */
-	uint64_t modulus_ {INT_MAX};								/*!< Modulus (this rolling hash is using modulus */
-	uint64_t fingerprint_ {0};									/*!< Current fingerprint */
-	uint64_t h_{ 0 };											/*!< Hash function coefficient */
-	uint8_t last_byte{ 0 };										/*!< Last byte of the window remembered for compute_next operation */
+	uint64_t modulus_ { INT_MAX };								/*!< Modulus */
+	uint64_t fingerprint_ { 0 };								/*!< Current fingerprint */
+	uint64_t h_ { 0 };											/*!< alphabet_size^(window-1) mod modulus */
+	std::vector<uint8_t> window_;								/*!< Ring buffer of the current window's bytes */
+	size_t window_head_ { 0 };									/*!< Index of the oldest byte (evicted next) */
 };
 
 
