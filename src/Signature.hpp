@@ -61,6 +61,8 @@ public:
 	* @param[in] file open FileIO to read from
 	*/
 	void generate_signatures(FileIO& file) {
+		chunks.clear();
+
 		if (!file.is_open())
 			return;
 

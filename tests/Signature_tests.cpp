@@ -84,6 +84,30 @@ TEST(Signature, small_file_under_window)
 	std::filesystem::remove(path);
 }
 
+TEST(Signature, regenerate_replaces_previous_chunks)
+{
+	// Calling generate_signatures twice on the same instance must not append
+	// to the previous run's chunks.
+	const auto p1 = std::filesystem::temp_directory_path() / "sig_regen_a";
+	const auto p2 = std::filesystem::temp_directory_path() / "sig_regen_b";
+	std::vector<uint8_t> a(WINDOW_DEF_SIZE * 4, 0xAA);
+	std::vector<uint8_t> b(WINDOW_DEF_SIZE / 2, 0xBB);
+	write_tmp(p1, a);
+	write_tmp(p2, b);
+
+	Signature<RKFinger, BLAKE512> sig;
+	sig.generate_signatures(p1);
+	const size_t first_count = sig.get_chunks().size();
+	ASSERT_GT(first_count, 0u);
+
+	sig.generate_signatures(p2);
+	ASSERT_EQ(sig.get_chunks().size(), 1u);
+	EXPECT_EQ(sig.get_chunks()[0].chunk_size, b.size());
+
+	std::filesystem::remove(p1);
+	std::filesystem::remove(p2);
+}
+
 TEST(Signature, small_file_distinct_signatures)
 {
 	// Two distinct sub-window files must yield distinct signatures — the bug
