@@ -2,16 +2,15 @@
 # Project: rolling_hash
 
 cmake_minimum_required(VERSION 3.16 FATAL_ERROR)
-project(rolling_hash)
+project(rolling_hash CXX)
 
 # Versioning
 set (RH_VERSION_MAJOR 0)
-set (RH_VERSION_MINOR 1)
+set (RH_VERSION_MINOR 2)
 set (RH_VERSION_REV 0)
 set (RH_VERSION "${RH_VERSION_MAJOR}.${RH_VERSION_MINOR}.${RH_VERSION_REV}" )
 
 # Configuration
-enable_language(CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -21,10 +20,15 @@ if (MSVC)
     add_compile_options(/W4)
 else()
     add_compile_options(-Wall -Wextra -pipe)
-    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS} -g3 -ggdb")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS} -g0 -Os")
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g3 -ggdb")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -g0 -Os")
+endif()
 
- #   set(CMAKE_EXE_LINKER_FLAGS "-z now -s")
+# Optional sanitizers (Debug builds only by default).
+option(RH_ENABLE_ASAN "Build with AddressSanitizer + UBSan" OFF)
+if (RH_ENABLE_ASAN AND NOT MSVC)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
 endif()
 
 # Checking time
