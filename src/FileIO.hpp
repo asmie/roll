@@ -1,11 +1,11 @@
 #ifndef FILEIO_HPP
 #define FILEIO_HPP
 
-#include <fstream>
-#include <vector>
-#include <memory>
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <span>
+#include <vector>
 
 /**
 * Helper enum to specify file access mode.
@@ -68,26 +68,17 @@ public:
 	int peek_byte();
 	
 	/**
-	* Read multiple bytes from stream.
-	* @param[in] chunk_size size of the chunk to read
-	* @return Pointer to vector of bytes read from stream.
+	* Read up to chunk_size bytes from the current stream position. The returned
+	* vector is sized to the actual number of bytes read; an empty vector means
+	* EOF or chunk_size == 0.
 	*/
-	std::unique_ptr<std::vector<uint8_t>> read_chunk(size_t chunk_size);
+	std::vector<uint8_t> read_chunk(size_t chunk_size);
 
 	/**
-	* Read multiple bytes from stream starting from specified position.
-	* @param[in] chunk_size size of the chunk to read
-	* @param[in] position starting position
-	* @return Pointer to vector of bytes read from stream.
+	* Read up to chunk_size bytes starting from `position`. Resets the stream
+	* state first so a prior EOF doesn't suppress the seek.
 	*/
-	std::unique_ptr<std::vector<uint8_t>> read_chunk(size_t chunk_size, size_t position);
-	
-	/**
-	* Write multiple bytes to stream.
-	* @param[in] buffer pointer to vector of bytes to write.
-	* @return True if bytes were written successfully, false otherwise.
-	*/
-	bool write_chunk(std::unique_ptr<std::vector<uint8_t>> buffer);
+	std::vector<uint8_t> read_chunk(size_t chunk_size, size_t position);
 
 	/**
 	* Write multiple bytes to stream.

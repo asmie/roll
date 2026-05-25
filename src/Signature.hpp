@@ -73,15 +73,14 @@ public:
 		U hash_func;
 		size_t bytes_read = 0;
 
-		auto res = file.read_chunk(fingerprint.get_window_size(), 0);
-		if (res->empty())
+		auto initial = file.read_chunk(fingerprint.get_window_size(), 0);
+		if (initial.empty())
 			return true;  // empty file -> open succeeded, no chunks to emit
 
-		bool full_window = fingerprint.initialize(*res);
-		bytes_read += res->size();
+		bool full_window = fingerprint.initialize(initial);
+		bytes_read += initial.size();
 
-		std::vector<uint8_t> chunk(std::move(*res));
-		res.reset();
+		std::vector<uint8_t> chunk(std::move(initial));
 		typename T::RollingHashType current_fingerprint = fingerprint.get_current_fingerprint();
 
 		// File smaller than one window: emit the polynomial-hash signature
@@ -97,13 +96,12 @@ public:
 		{
 			if (init)														// init rolling hash for next chunk
 			{
-				res = file.read_chunk(fingerprint.get_window_size());
-				if (res->empty())
+				auto next = file.read_chunk(fingerprint.get_window_size());
+				if (next.empty())
 					break;
-				full_window = fingerprint.initialize(*res);
-				bytes_read += res->size();
-				chunk = std::move(*res);
-				res.reset();
+				full_window = fingerprint.initialize(next);
+				bytes_read += next.size();
+				chunk = std::move(next);
 				current_fingerprint = fingerprint.get_current_fingerprint();
 
 				if (!full_window)

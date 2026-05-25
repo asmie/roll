@@ -91,9 +91,9 @@ TEST(FileIO, read)
 
 	EXPECT_TRUE(fio.open(path, FileMode::INOUT));
 	auto buf = fio.read_chunk(22);
-	EXPECT_EQ(buf->size(), 22u);
+	EXPECT_EQ(buf.size(), 22u);
 
-	const std::string read_back(buf->begin(), buf->end());
+	const std::string read_back(buf.begin(), buf.end());
 	EXPECT_EQ(read_back, std::string(TEST_STR));
 
 	fio.close();
@@ -109,17 +109,17 @@ TEST(FileIO, read_incorrect)
 	EXPECT_TRUE(fio.open(path, FileMode::INOUT));
 
 	auto buf = fio.read_chunk(0);
-	EXPECT_EQ(buf->size(), 0u);
+	EXPECT_EQ(buf.size(), 0u);
 
 	buf = fio.read_chunk(22);
-	EXPECT_EQ(buf->size(), 22u);
-	EXPECT_EQ(std::string(buf->begin(), buf->end()), std::string(TEST_STR));
+	EXPECT_EQ(buf.size(), 22u);
+	EXPECT_EQ(std::string(buf.begin(), buf.end()), std::string(TEST_STR));
 
 	buf = fio.read_chunk(100);
-	EXPECT_EQ(buf->size(), 1u);
+	EXPECT_EQ(buf.size(), 1u);
 
 	buf = fio.read_chunk(100);
-	EXPECT_EQ(buf->size(), 0u);
+	EXPECT_EQ(buf.size(), 0u);
 
 	fio.close();
 	remove_file(path);

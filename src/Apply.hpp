@@ -139,7 +139,7 @@ private:
 			}
 
 			auto hash_buf = delta.read_chunk(hash_size);
-			if (!hash_buf || hash_buf->size() != hash_size) {
+			if (hash_buf.size() != hash_size) {
 				result.error_message = "Truncated delta: missing hash";
 				return result;
 			}
@@ -160,7 +160,7 @@ private:
 				case EntryType::ORIGINAL_CHUNK: {
 					SignedChunk<typename T::RollingHashType> probe;
 					probe.signature = signature;
-					probe.hash = std::move(*hash_buf);
+					probe.hash = std::move(hash_buf);
 					probe.chunk_size = chunk_size;
 					probe.start_offset = 0;
 
@@ -172,35 +172,35 @@ private:
 
 					auto data = old_file.read_chunk(old_chunks[k].chunk_size,
 					                                old_chunks[k].start_offset);
-					if (!data || data->size() != old_chunks[k].chunk_size) {
+					if (data.size() != old_chunks[k].chunk_size) {
 						result.error_message = "Failed to read old chunk";
 						return result;
 					}
-					if (!output.write_chunk(*data)) {
+					if (!output.write_chunk(data)) {
 						result.error_message = "Failed to write output chunk";
 						return result;
 					}
 					original_used[k] = true;
-					result.bytes_written += data->size();
+					result.bytes_written += data.size();
 					new_idx++;
 					break;
 				}
 
 				case EntryType::ADDED_CHUNK: {
 					auto payload = delta.read_chunk(chunk_size);
-					if (!payload || payload->size() != chunk_size) {
+					if (payload.size() != chunk_size) {
 						result.error_message = "Truncated delta: short ADDED payload";
 						return result;
 					}
-					if (!verifyHash(hash_func, hash_size, *payload, *hash_buf)) {
+					if (!verifyHash(hash_func, hash_size, payload, hash_buf)) {
 						result.error_message = "ADDED entry hash mismatch";
 						return result;
 					}
-					if (!output.write_chunk(*payload)) {
+					if (!output.write_chunk(payload)) {
 						result.error_message = "Failed to write output chunk";
 						return result;
 					}
-					result.bytes_written += payload->size();
+					result.bytes_written += payload.size();
 					new_idx++;
 					break;
 				}
@@ -212,16 +212,16 @@ private:
 					}
 					const auto& src = old_chunks[new_idx];
 					auto old_data = old_file.read_chunk(src.chunk_size, src.start_offset);
-					if (!old_data || old_data->size() != src.chunk_size) {
+					if (old_data.size() != src.chunk_size) {
 						result.error_message = "Failed to read MODIFIED source chunk";
 						return result;
 					}
 
 					std::vector<uint8_t> reconstructed;
-					if (!applyDiff(delta, *old_data, chunk_size, reconstructed, result))
+					if (!applyDiff(delta, old_data, chunk_size, reconstructed, result))
 						return result;
 
-					if (!verifyHash(hash_func, hash_size, reconstructed, *hash_buf)) {
+					if (!verifyHash(hash_func, hash_size, reconstructed, hash_buf)) {
 						result.error_message = "MODIFIED entry hash mismatch";
 						return result;
 					}
@@ -241,7 +241,7 @@ private:
 					// duplicate or extraneous REMOVEDs are rejected.
 					SignedChunk<typename T::RollingHashType> probe;
 					probe.signature = signature;
-					probe.hash = std::move(*hash_buf);
+					probe.hash = std::move(hash_buf);
 					probe.chunk_size = chunk_size;
 					probe.start_offset = 0;
 
@@ -335,17 +335,17 @@ private:
 
 	bool verifyHeader(FileIO& delta, Result& result) {
 		auto buf = delta.read_chunk(DELTA_HEADER_SIZE);
-		if (!buf || buf->size() != DELTA_HEADER_SIZE) {
+		if (buf.size() != DELTA_HEADER_SIZE) {
 			result.error_message = "Truncated delta: missing header";
 			return false;
 		}
-		if (!std::equal(std::begin(DELTA_MAGIC), std::end(DELTA_MAGIC), buf->begin())) {
+		if (!std::equal(std::begin(DELTA_MAGIC), std::end(DELTA_MAGIC), buf.begin())) {
 			result.error_message = "Bad delta magic";
 			return false;
 		}
 		uint32_t version = 0;
 		for (size_t i = 0; i < sizeof(version); ++i)
-			version = (version << 8) | (*buf)[sizeof(DELTA_MAGIC) + i];
+			version = (version << 8) | buf[sizeof(DELTA_MAGIC) + i];
 		if (version != DELTA_FORMAT_VERSION) {
 			result.error_message = "Unsupported delta version: " + std::to_string(version);
 			return false;
@@ -355,9 +355,9 @@ private:
 
 	bool readU64BE(FileIO& f, uint64_t& out) {
 		auto buf = f.read_chunk(sizeof(uint64_t));
-		if (!buf || buf->size() != sizeof(uint64_t)) return false;
+		if (buf.size() != sizeof(uint64_t)) return false;
 		uint64_t v;
-		std::memcpy(&v, buf->data(), sizeof(uint64_t));
+		std::memcpy(&v, buf.data(), sizeof(uint64_t));
 		if constexpr (std::endian::native == std::endian::little)
 			v = std::byteswap(v);
 		out = v;
@@ -366,9 +366,9 @@ private:
 
 	bool readU32BE(FileIO& f, uint32_t& out) {
 		auto buf = f.read_chunk(sizeof(uint32_t));
-		if (!buf || buf->size() != sizeof(uint32_t)) return false;
+		if (buf.size() != sizeof(uint32_t)) return false;
 		uint32_t v;
-		std::memcpy(&v, buf->data(), sizeof(uint32_t));
+		std::memcpy(&v, buf.data(), sizeof(uint32_t));
 		if constexpr (std::endian::native == std::endian::little)
 			v = std::byteswap(v);
 		out = v;
@@ -429,7 +429,7 @@ private:
 				}
 				uint8_t count = static_cast<uint8_t>(count_int);
 				auto inline_buf = delta.read_chunk(count);
-				if (!inline_buf || inline_buf->size() != count) {
+				if (inline_buf.size() != count) {
 					result.error_message = "Truncated diff: missing inline bytes";
 					return false;
 				}
@@ -437,7 +437,7 @@ private:
 					result.error_message = "Diff out of bounds (inline write)";
 					return false;
 				}
-				output.insert(output.end(), inline_buf->begin(), inline_buf->end());
+				output.insert(output.end(), inline_buf.begin(), inline_buf.end());
 				new_pos += count;
 				if (op == 'D') {
 					if (old_pos + count > old_data.size()) {

@@ -216,8 +216,8 @@ private:
                 auto new_data = file.read_chunk(new_chunks[i].chunk_size,
                                                new_chunks[i].start_offset);
 
-                if (old_data && new_data) {
-                    entry.chunk_data_raw = createOptimizedDiff(*old_data, *new_data);
+                if (!old_data.empty() && !new_data.empty()) {
+                    entry.chunk_data_raw = createOptimizedDiff(old_data, new_data);
                     is_modification = true;
                     original_used[i] = true;
                 }
@@ -227,11 +227,8 @@ private:
                 entry.type = EntryType::ADDED_CHUNK;
                 entry.chunk_data = new_chunks[i];
 
-                auto chunk_data = file.read_chunk(entry.chunk_data.chunk_size,
-                                                 entry.chunk_data.start_offset);
-                if (chunk_data) {
-                    entry.chunk_data_raw = std::move(*chunk_data);
-                }
+                entry.chunk_data_raw = file.read_chunk(entry.chunk_data.chunk_size,
+                                                       entry.chunk_data.start_offset);
             }
 
             if (!writeDeltaEntry(delta, entry, result)) return false;
