@@ -3,9 +3,10 @@
 
 #include "IRollingHash.hpp"
 
-#include <cstdint>
 #include <climits>
+#include <cstdint>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 constexpr unsigned int ALPHABET_DEF_SIZE = 256;
@@ -19,6 +20,10 @@ public:
 	RKFinger() { init_state(); }
 	RKFinger(unsigned int alphabet_size, unsigned int window_size, uint64_t modulus)
 		: alphabet_size_(alphabet_size), window_size_(window_size), modulus_(modulus) {
+		if (window_size_ == 0)
+			throw std::invalid_argument("RKFinger: window_size must be > 0");
+		if (modulus_ == 0)
+			throw std::invalid_argument("RKFinger: modulus must be > 0");
 		init_state();
 	}
 
@@ -73,13 +78,13 @@ private:
 			h_ = (h_ * alphabet_size_) % modulus_;
 	}
 
-	unsigned int alphabet_size_ { ALPHABET_DEF_SIZE };			/*!< Possible alphabet size */
-	unsigned int window_size_ { WINDOW_DEF_SIZE };				/*!< Window size */
-	uint64_t modulus_ { INT_MAX };								/*!< Modulus */
-	uint64_t fingerprint_ { 0 };								/*!< Current fingerprint */
-	uint64_t h_ { 0 };											/*!< alphabet_size^(window-1) mod modulus */
-	std::vector<uint8_t> window_;								/*!< Ring buffer of the current window's bytes */
-	size_t window_head_ { 0 };									/*!< Index of the oldest byte (evicted next) */
+	unsigned int alphabet_size_ { ALPHABET_DEF_SIZE };
+	unsigned int window_size_ { WINDOW_DEF_SIZE };
+	uint64_t modulus_ { INT_MAX };  // M31 Mersenne prime — fits products in uint64_t.
+	uint64_t fingerprint_ { 0 };
+	uint64_t h_ { 0 };              // alphabet_size^(window-1) mod modulus
+	std::vector<uint8_t> window_;   // ring buffer of the current window's bytes
+	size_t window_head_ { 0 };      // index of the oldest byte (evicted next)
 };
 
 

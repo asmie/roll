@@ -69,8 +69,18 @@ TEST(RKfinger, get_window_size)
 TEST(RKfinger, get_modulus)
 {
 	RKFinger rk(12, 30, 123009);
-	
+
 	EXPECT_EQ(rk.get_modulus(), 123009);
+}
+
+TEST(RKfinger, ctor_rejects_zero_window)
+{
+	EXPECT_THROW(RKFinger(256, 0, 123009), std::invalid_argument);
+}
+
+TEST(RKfinger, ctor_rejects_zero_modulus)
+{
+	EXPECT_THROW(RKFinger(256, 48, 0), std::invalid_argument);
 }
 
 TEST(RKfinger, default_params)
