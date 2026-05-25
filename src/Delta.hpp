@@ -5,18 +5,17 @@
 #include "Signature.hpp"
 #include "FileIO.hpp"
 
-#include <string>
-#include <vector>
-#include <unordered_map>
 #include <algorithm>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
-#include <optional>
 #include <span>
+#include <string>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 /**
 * Entry type for each delta record.
@@ -40,13 +39,9 @@ struct DeltaEntry {
 };
 
 /**
-* Optimized class for generating deltas between two files using their signatures.
-*
-* Key improvements:
-* - O(n) complexity using hash maps instead of O(n²) nested loops
-* - Run-length encoding for efficient diff storage
-* - Proper error handling with Result structure
-* - Modular design with clear phases
+* Generates a binary delta between two file signatures by emitting one entry
+* per chunk of the new file (followed by REMOVED entries for old chunks not
+* referenced from the new file).
 */
 template<RollingHashAlgorithm T, StrongHashAlgorithm U>
 class Delta {
@@ -92,14 +87,8 @@ public:
 
         // Build hash map for O(1) chunk lookups
         auto chunk_map = buildChunkMap(original_chunks);
-
-        // Process chunks with optimized algorithm
-        bool ok;
-        if (original_chunks.size() == 1 && new_chunks.size() == 1) {
-            ok = processSingleChunkFiles(original_chunks[0], new_chunks[0], old, file, delta, result);
-        } else {
-            ok = processMultipleChunks(original_chunks, new_chunks, chunk_map, old, file, delta, result);
-        }
+        const bool ok = processMultipleChunks(original_chunks, new_chunks, chunk_map,
+                                              old, file, delta, result);
 
         old.close();
         file.close();
@@ -177,35 +166,6 @@ private:
             result.error_message = "Failed to create delta file: " + delta_file.string();
             return false;
         }
-        return true;
-    }
-
-    /**
-    * Process single chunk files
-    */
-    bool processSingleChunkFiles(const SignedChunk<typename T::RollingHashType>& old_chunk,
-                                 const SignedChunk<typename T::RollingHashType>& new_chunk,
-                                 FileIO& old, FileIO& file, FileIO& delta, Result& result) {
-        DeltaEntry<typename T::RollingHashType> entry;
-
-        if (old_chunk == new_chunk) {
-            entry.type = EntryType::ORIGINAL_CHUNK;
-            entry.chunk_data = old_chunk;
-        } else {
-            entry.type = EntryType::MODIFIED_CHUNK;
-            entry.chunk_data = new_chunk;
-
-            auto old_data = old.read_chunk(old_chunk.chunk_size, old_chunk.start_offset);
-            auto new_data = file.read_chunk(new_chunk.chunk_size, new_chunk.start_offset);
-
-            if (old_data && new_data) {
-                entry.chunk_data_raw = createOptimizedDiff(*old_data, *new_data);
-            }
-        }
-
-        if (!writeDeltaEntry(delta, entry, result))
-            return false;
-        result.chunks_processed = 1;
         return true;
     }
 
