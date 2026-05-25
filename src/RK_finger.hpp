@@ -28,21 +28,22 @@ public:
 	RKFinger& operator=(RKFinger&& other) = default;
 
 	/**
-	* Computes initial hash value and seeds the sliding window.
-	* @param initial[in] initial data to be hashed - must be at least window_size length.
-	* @return True if init was successful, otherwise false (if initial data is too short).
+	* Computes initial hash value and seeds the sliding window. Always sets a
+	* deterministic state from the provided bytes; returns false when fewer
+	* than window_size bytes are available, signalling that compute_next must
+	* not be called (no full window to roll).
 	*/
 	bool initialize(std::span<const uint8_t> initial) noexcept override {
-		if (initial.size() < window_size_)
-			return false;
-
 		fingerprint_ = 0;
-		for (unsigned int i = 0; i < window_size_; i++) {
+		window_head_ = 0;
+		const size_t n = initial.size() < window_size_ ? initial.size() : window_size_;
+		for (size_t i = 0; i < n; i++) {
 			window_[i] = initial[i];
 			fingerprint_ = (alphabet_size_ * fingerprint_ + initial[i]) % modulus_;
 		}
-		window_head_ = 0;
-		return true;
+		for (size_t i = n; i < window_size_; i++)
+			window_[i] = 0;
+		return initial.size() >= window_size_;
 	}
 
 	/**

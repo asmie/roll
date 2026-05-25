@@ -72,12 +72,19 @@ public:
 		if (res->empty())
 			return;
 
-		fingerprint.initialize(*res);
+		bool full_window = fingerprint.initialize(*res);
 		bytes_read += res->size();
 
-		std::vector<uint8_t> chunk(*res);
+		std::vector<uint8_t> chunk(std::move(*res));
 		res.reset();
-		typename T::RollingHashType current_fingerprint{};
+		typename T::RollingHashType current_fingerprint = fingerprint.get_current_fingerprint();
+
+		// File smaller than one window: emit the polynomial-hash signature
+		// computed by initialize() and bail — there is nothing to roll.
+		if (!full_window) {
+			emit_chunk(chunk, current_fingerprint, bytes_read - chunk.size(), hash_func);
+			return;
+		}
 
 		bool init = false;
 
@@ -88,10 +95,14 @@ public:
 				res = file.read_chunk(fingerprint.get_window_size());
 				if (res->empty())
 					break;
-				fingerprint.initialize(*res);
+				full_window = fingerprint.initialize(*res);
 				bytes_read += res->size();
-				chunk = *res;
+				chunk = std::move(*res);
 				res.reset();
+				current_fingerprint = fingerprint.get_current_fingerprint();
+
+				if (!full_window)
+					break;	// EOF mid-window: emit `chunk` as the residual below.
 
 				init = false;
 			}
@@ -120,28 +131,14 @@ public:
 
 			if (boundary_found)					// chunk boundary found
 			{
-				SignedChunk<typename T::RollingHashType> schunk;
-				schunk.signature = current_fingerprint;
-				schunk.hash.resize(hash_func.get_hash_size());
-				hash_func.hash(schunk.hash, chunk);
-				schunk.start_offset = bytes_read - chunk.size();
-				schunk.chunk_size = chunk.size();
-				chunks.push_back(std::move(schunk));
+				emit_chunk(chunk, current_fingerprint, bytes_read - chunk.size(), hash_func);
 				chunk.clear();
 				init = true;
 			}
 		}
 
 		if (chunk.size() > 0)									// emit residual chunk at EOF
-		{
-			SignedChunk<typename T::RollingHashType> schunk;
-			schunk.signature = current_fingerprint;
-			schunk.hash.resize(hash_func.get_hash_size());
-			hash_func.hash(schunk.hash, chunk);
-			schunk.start_offset = bytes_read - chunk.size();
-			schunk.chunk_size = chunk.size();
-			chunks.push_back(std::move(schunk));
-		}
+			emit_chunk(chunk, current_fingerprint, bytes_read - chunk.size(), hash_func);
 	}
 
 	/**
@@ -153,6 +150,18 @@ public:
 	}
 
 private:
+	void emit_chunk(const std::vector<uint8_t>& data,
+	                typename T::RollingHashType signature,
+	                size_t start_offset, U& hash_func) {
+		SignedChunk<typename T::RollingHashType> schunk;
+		schunk.signature = signature;
+		schunk.hash.resize(hash_func.get_hash_size());
+		hash_func.hash(schunk.hash, data);
+		schunk.start_offset = start_offset;
+		schunk.chunk_size = data.size();
+		chunks.push_back(std::move(schunk));
+	}
+
 	std::vector<SignedChunk<typename T::RollingHashType>> chunks;
 };
 
