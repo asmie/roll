@@ -1,5 +1,6 @@
 #include "FileIO.hpp"
 
+#include <bit>
 #include <fstream>
 
 FileIO::~FileIO()
@@ -89,11 +90,14 @@ bool FileIO::write_chunk(std::span<const uint8_t> chunk)
 
 bool FileIO::write_chunk(uint64_t chunk)
 {
+	if constexpr (std::endian::native == std::endian::little)
+		chunk = std::byteswap(chunk);
+
 	try {
-		f_.write((const char *) &chunk, sizeof(chunk));
+		f_.write(reinterpret_cast<const char*>(&chunk), sizeof(chunk));
 	}
 	catch (std::fstream::failure&) {}
-	
+
 	return f_.good();
 }
 

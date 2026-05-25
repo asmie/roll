@@ -101,13 +101,13 @@ public:
 			if (peek == EOF) break;
 
 			uint64_t entry_type_raw;
-			if (!readU64Native(delta, entry_type_raw)) {
+			if (!readU64BE(delta, entry_type_raw)) {
 				result.error_message = "Truncated delta: partial entry header";
 				return result;
 			}
 
 			uint64_t signature;
-			if (!readU64Native(delta, signature)) {
+			if (!readU64BE(delta, signature)) {
 				result.error_message = "Truncated delta: missing signature";
 				return result;
 			}
@@ -119,7 +119,7 @@ public:
 			}
 
 			uint64_t chunk_size;
-			if (!readU64Native(delta, chunk_size)) {
+			if (!readU64BE(delta, chunk_size)) {
 				result.error_message = "Truncated delta: missing chunk_size";
 				return result;
 			}
@@ -299,10 +299,14 @@ private:
 		return computed == expected;
 	}
 
-	bool readU64Native(FileIO& f, uint64_t& out) {
+	bool readU64BE(FileIO& f, uint64_t& out) {
 		auto buf = f.read_chunk(sizeof(uint64_t));
 		if (!buf || buf->size() != sizeof(uint64_t)) return false;
-		std::memcpy(&out, buf->data(), sizeof(uint64_t));
+		uint64_t v;
+		std::memcpy(&v, buf->data(), sizeof(uint64_t));
+		if constexpr (std::endian::native == std::endian::little)
+			v = std::byteswap(v);
+		out = v;
 		return true;
 	}
 

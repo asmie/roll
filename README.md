@@ -120,9 +120,9 @@ If `cmp` exits successfully, the reconstructed file matches the new file.
 5. `Apply` reads the old file and delta records in target-file order, verifies
    hashes for generated payloads, and writes the reconstructed output.
 
-The delta format is native-endian for 64-bit entry fields and big-endian for
-32-bit diff opcode positions/lengths. Treat generated deltas as an internal
-format for matching builds unless compatibility is explicitly versioned.
+The delta format is big-endian for all multi-byte integer fields. Treat
+generated deltas as an internal format for matching builds unless
+compatibility is explicitly versioned.
 
 ## Tests
 

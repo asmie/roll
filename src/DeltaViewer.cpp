@@ -1,5 +1,6 @@
 #include "DeltaViewer.hpp"
 
+#include <bit>
 #include <cctype>
 #include <cstdint>
 #include <fstream>
@@ -35,7 +36,12 @@ bool readExact(std::ifstream& file, void* out, std::streamsize size) {
 }
 
 bool readUint64(std::ifstream& file, uint64_t& value) {
-	return readExact(file, &value, sizeof(value));
+	uint64_t v;
+	if (!readExact(file, &v, sizeof(v))) return false;
+	if constexpr (std::endian::native == std::endian::little)
+		v = std::byteswap(v);
+	value = v;
+	return true;
 }
 
 bool readUint32BE(std::ifstream& file, uint32_t& value) {
