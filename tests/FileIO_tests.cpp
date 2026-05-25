@@ -1,145 +1,126 @@
 #include "gtest/gtest.h"
 #include "FileIO.hpp"
 
+#include <atomic>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <string>
-#include <sstream>
 
-#define TEST_FILE "test_file"
 #define TEST_STR "This is the test file\n"
 
-void prepare_file();
-void remove_file();
+namespace {
 
+std::string make_test_path()
+{
+	static std::atomic<unsigned> counter{0};
+	const auto p = std::filesystem::temp_directory_path() /
+	               ("roll_fio_" + std::to_string(counter++) + "_test_file");
+	return p.string();
+}
+
+void prepare_file(const std::string& path)
+{
+	std::fstream f(path, std::fstream::out);
+	f << TEST_STR << std::endl;
+	f.close();
+}
+
+void remove_file(const std::string& path)
+{
+	std::remove(path.c_str());
+}
+
+} // namespace
 
 TEST(FileIO, open_close)
 {
 	FileIO fio;
-	prepare_file();
+	const auto path = make_test_path();
+	prepare_file(path);
 
-	auto res = fio.open(TEST_FILE, FileMode::INOUT);
-	EXPECT_EQ(res, true);
-
+	EXPECT_TRUE(fio.open(path, FileMode::INOUT));
 	fio.close();
 
-	remove_file();
+	remove_file(path);
 }
 
 TEST(FileIO, is_open)
 {
 	FileIO fio;
-	prepare_file();
+	const auto path = make_test_path();
+	prepare_file(path);
 
-	EXPECT_EQ(fio.is_open(), false);
-	
-	auto res = fio.open(TEST_FILE, FileMode::INOUT);
-	EXPECT_EQ(res, true);
-
-	EXPECT_EQ(fio.is_open(), true);
+	EXPECT_FALSE(fio.is_open());
+	EXPECT_TRUE(fio.open(path, FileMode::INOUT));
+	EXPECT_TRUE(fio.is_open());
 
 	fio.close();
-
-	remove_file();
+	remove_file(path);
 }
 
 TEST(FileIO, is_eof)
 {
 	FileIO fio;
-	prepare_file();
+	const auto path = make_test_path();
+	prepare_file(path);
 
-	EXPECT_EQ(fio.is_open(), false);
+	EXPECT_FALSE(fio.is_open());
+	EXPECT_TRUE(fio.open(path, FileMode::INOUT));
+	EXPECT_FALSE(fio.is_eof());
 
-	auto res = fio.open(TEST_FILE, FileMode::INOUT);
-	EXPECT_EQ(res, true);
-	EXPECT_EQ(fio.is_eof(), false);
-
-	auto res2 = fio.read_chunk(200);
-
-	EXPECT_EQ(fio.is_eof(), true);
+	fio.read_chunk(200);
+	EXPECT_TRUE(fio.is_eof());
 
 	fio.close();
-
-	remove_file();
+	remove_file(path);
 }
 
 TEST(FileIO, open_non_existing)
 {
 	FileIO fio;
-
-	auto res = fio.open("non-existing_file", FileMode::INOUT);
-	EXPECT_EQ(res, false);
-
+	EXPECT_FALSE(fio.open("non-existing_file_xyzzy_roll_test", FileMode::INOUT));
 	fio.close();
 }
 
 TEST(FileIO, read)
 {
 	FileIO fio;
-	prepare_file();
+	const auto path = make_test_path();
+	prepare_file(path);
 
-	auto res = fio.open(TEST_FILE, FileMode::INOUT);
-	EXPECT_EQ(res, true);
+	EXPECT_TRUE(fio.open(path, FileMode::INOUT));
+	auto buf = fio.read_chunk(22);
+	EXPECT_EQ(buf->size(), 22u);
 
-	auto res2 = fio.read_chunk(22);
-
-	EXPECT_EQ(res2.get()->size(), 22);
-
-	std::string fRead(res2.get()->begin(), res2.get()->end());
-	std::string patt(TEST_STR);
-
-	EXPECT_EQ(fRead, patt);
+	const std::string read_back(buf->begin(), buf->end());
+	EXPECT_EQ(read_back, std::string(TEST_STR));
 
 	fio.close();
-
-	remove_file();
+	remove_file(path);
 }
 
 TEST(FileIO, read_incorrect)
 {
 	FileIO fio;
-	prepare_file();
+	const auto path = make_test_path();
+	prepare_file(path);
 
-	auto res = fio.open(TEST_FILE, FileMode::INOUT);
-	EXPECT_EQ(res, true);
+	EXPECT_TRUE(fio.open(path, FileMode::INOUT));
 
-	auto res2 = fio.read_chunk(0);
+	auto buf = fio.read_chunk(0);
+	EXPECT_EQ(buf->size(), 0u);
 
-	EXPECT_EQ(res2.get()->size(), 0);
+	buf = fio.read_chunk(22);
+	EXPECT_EQ(buf->size(), 22u);
+	EXPECT_EQ(std::string(buf->begin(), buf->end()), std::string(TEST_STR));
 
-	res2 = fio.read_chunk(22);
+	buf = fio.read_chunk(100);
+	EXPECT_EQ(buf->size(), 1u);
 
-	EXPECT_EQ(res2.get()->size(), 22);
-
-	std::string fRead(res2.get()->begin(), res2.get()->end());
-	std::string patt(TEST_STR);
-
-	EXPECT_EQ(fRead, patt);
-
-	res2 = fio.read_chunk(100);						// Flush rest of file
-
-	EXPECT_EQ(res2.get()->size(), 1);
-
-	res2 = fio.read_chunk(100);						// Try to read after EOF
-
-	EXPECT_EQ(res2.get()->size(), 0);
+	buf = fio.read_chunk(100);
+	EXPECT_EQ(buf->size(), 0u);
 
 	fio.close();
-
-	remove_file();
-}
-
-#include <fstream>
-#include <iostream>
-#include <cstdio>
-void prepare_file()
-{
-	std::fstream f(TEST_FILE, std::fstream::out);
-
-	f << TEST_STR << std::endl;
-
-	f.close();
-}
-
-void remove_file()
-{
-	remove(TEST_FILE);
+	remove_file(path);
 }

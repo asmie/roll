@@ -6,8 +6,10 @@
 #include "Signature.hpp"
 #include "blake.h"
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <random>
 #include <string>
@@ -28,6 +30,16 @@ inline size_t entry_header_size()
 constexpr size_t d_opcode_size(size_t inline_count)
 {
 	return 1 + sizeof(uint32_t) + 1 + inline_count;
+}
+
+// Build a unique path in the system temp directory so tests don't trample
+// each other and can run in parallel.
+std::string tpath(const char* name)
+{
+	static std::atomic<unsigned> counter{0};
+	const auto p = std::filesystem::temp_directory_path() /
+	               ("roll_" + std::to_string(counter++) + "_" + name);
+	return p.string();
 }
 
 void write_random(const std::string& path, size_t bytes, uint32_t seed)
@@ -58,10 +70,10 @@ std::vector<uint8_t> read_all(const std::string& path)
 	return buf;
 }
 
-void cleanup(std::initializer_list<const char*> paths)
+void cleanup(std::initializer_list<std::string> paths)
 {
-	for (const auto* p : paths)
-		std::remove(p);
+	for (const auto& p : paths)
+		std::remove(p.c_str());
 }
 
 bool roundtrip(const std::string& old_path, const std::string& new_path,
@@ -92,10 +104,10 @@ bool roundtrip(const std::string& old_path, const std::string& new_path,
 
 TEST(Apply, identical_files)
 {
-	const char* OLD = "apply_t_identical_old";
-	const char* NEW = "apply_t_identical_new";
-	const char* DELTA = "apply_t_identical_delta";
-	const char* OUT = "apply_t_identical_out";
+	const std::string OLD = tpath("apply_t_identical_old");
+	const std::string NEW = tpath("apply_t_identical_new");
+	const std::string DELTA = tpath("apply_t_identical_delta");
+	const std::string OUT = tpath("apply_t_identical_out");
 
 	write_random(OLD, 8192, 0xC0FFEE);
 	write_random(NEW, 8192, 0xC0FFEE);
@@ -109,10 +121,10 @@ TEST(Apply, identical_files)
 
 TEST(Apply, empty_old)
 {
-	const char* OLD = "apply_t_empty_old_old";
-	const char* NEW = "apply_t_empty_old_new";
-	const char* DELTA = "apply_t_empty_old_delta";
-	const char* OUT = "apply_t_empty_old_out";
+	const std::string OLD = tpath("apply_t_empty_old_old");
+	const std::string NEW = tpath("apply_t_empty_old_new");
+	const std::string DELTA = tpath("apply_t_empty_old_delta");
+	const std::string OUT = tpath("apply_t_empty_old_out");
 
 	write_bytes(OLD, {});
 	write_random(NEW, 4096, 0xBEEFu);
@@ -126,10 +138,10 @@ TEST(Apply, empty_old)
 
 TEST(Apply, empty_new)
 {
-	const char* OLD = "apply_t_empty_new_old";
-	const char* NEW = "apply_t_empty_new_new";
-	const char* DELTA = "apply_t_empty_new_delta";
-	const char* OUT = "apply_t_empty_new_out";
+	const std::string OLD = tpath("apply_t_empty_new_old");
+	const std::string NEW = tpath("apply_t_empty_new_new");
+	const std::string DELTA = tpath("apply_t_empty_new_delta");
+	const std::string OUT = tpath("apply_t_empty_new_out");
 
 	write_random(OLD, 4096, 0xCAFEu);
 	write_bytes(NEW, {});
@@ -143,10 +155,10 @@ TEST(Apply, empty_new)
 
 TEST(Apply, append_only)
 {
-	const char* OLD = "apply_t_append_old";
-	const char* NEW = "apply_t_append_new";
-	const char* DELTA = "apply_t_append_delta";
-	const char* OUT = "apply_t_append_out";
+	const std::string OLD = tpath("apply_t_append_old");
+	const std::string NEW = tpath("apply_t_append_new");
+	const std::string DELTA = tpath("apply_t_append_delta");
+	const std::string OUT = tpath("apply_t_append_out");
 
 	write_random(OLD, 8192, 0xDEADu);
 
@@ -167,10 +179,10 @@ TEST(Apply, append_only)
 
 TEST(Apply, truncate_only)
 {
-	const char* OLD = "apply_t_trunc_old";
-	const char* NEW = "apply_t_trunc_new";
-	const char* DELTA = "apply_t_trunc_delta";
-	const char* OUT = "apply_t_trunc_out";
+	const std::string OLD = tpath("apply_t_trunc_old");
+	const std::string NEW = tpath("apply_t_trunc_new");
+	const std::string DELTA = tpath("apply_t_trunc_delta");
+	const std::string OUT = tpath("apply_t_trunc_out");
 
 	write_random(OLD, 8192 + 4096, 0xFEEDu);
 	auto big = read_all(OLD);
@@ -186,10 +198,10 @@ TEST(Apply, truncate_only)
 
 TEST(Apply, in_chunk_modification_dwords)
 {
-	const char* OLD = "apply_t_inplace_old";
-	const char* NEW = "apply_t_inplace_new";
-	const char* DELTA = "apply_t_inplace_delta";
-	const char* OUT = "apply_t_inplace_out";
+	const std::string OLD = tpath("apply_t_inplace_old");
+	const std::string NEW = tpath("apply_t_inplace_new");
+	const std::string DELTA = tpath("apply_t_inplace_delta");
+	const std::string OUT = tpath("apply_t_inplace_out");
 
 	// 256-byte file: below MIN_CHUNK_SIZE=512, so it stays a single chunk and
 	// content-defined boundary detection cannot shift between old and new.
@@ -212,10 +224,10 @@ TEST(Apply, in_chunk_modification_dwords)
 
 TEST(Apply, in_chunk_deletion_consumes_x_opcode)
 {
-	const char* OLD = "apply_t_xop_old";
-	const char* NEW = "apply_t_xop_new";
-	const char* DELTA = "apply_t_xop_delta";
-	const char* OUT = "apply_t_xop_out";
+	const std::string OLD = tpath("apply_t_xop_old");
+	const std::string NEW = tpath("apply_t_xop_new");
+	const std::string DELTA = tpath("apply_t_xop_delta");
+	const std::string OUT = tpath("apply_t_xop_out");
 
 	// 256 distinct bytes form a single chunk (< MIN_CHUNK_SIZE). Removing one
 	// byte in the middle makes every byte after the deletion point differ from
@@ -240,10 +252,10 @@ TEST(Apply, in_chunk_deletion_consumes_x_opcode)
 
 TEST(Apply, middle_modification_preserves_order)
 {
-	const char* OLD = "apply_t_mid_old";
-	const char* NEW = "apply_t_mid_new";
-	const char* DELTA = "apply_t_mid_delta";
-	const char* OUT = "apply_t_mid_out";
+	const std::string OLD = tpath("apply_t_mid_old");
+	const std::string NEW = tpath("apply_t_mid_new");
+	const std::string DELTA = tpath("apply_t_mid_delta");
+	const std::string OUT = tpath("apply_t_mid_out");
 
 	// 64 KB ensures the CDC produces multiple chunks (MAX_CHUNK_SIZE = 16 KB).
 	// Flipping a small middle range modifies a middle chunk while surrounding
@@ -264,10 +276,10 @@ TEST(Apply, middle_modification_preserves_order)
 
 TEST(Apply, truncated_added_payload_fails)
 {
-	const char* OLD = "apply_t_trunc_pl_old";
-	const char* NEW = "apply_t_trunc_pl_new";
-	const char* DELTA = "apply_t_trunc_pl_delta";
-	const char* OUT = "apply_t_trunc_pl_out";
+	const std::string OLD = tpath("apply_t_trunc_pl_old");
+	const std::string NEW = tpath("apply_t_trunc_pl_new");
+	const std::string DELTA = tpath("apply_t_trunc_pl_delta");
+	const std::string OUT = tpath("apply_t_trunc_pl_out");
 
 	// Empty old + non-empty new yields an all-ADDED delta whose tail is a
 	// chunk payload — chopping bytes off the end leaves a short final payload.
@@ -298,10 +310,10 @@ TEST(Apply, truncated_added_payload_fails)
 
 TEST(Apply, truncated_modified_after_header_fails)
 {
-	const char* OLD = "apply_t_modtrunc1_old";
-	const char* NEW = "apply_t_modtrunc1_new";
-	const char* DELTA = "apply_t_modtrunc1_delta";
-	const char* OUT = "apply_t_modtrunc1_out";
+	const std::string OLD = tpath("apply_t_modtrunc1_old");
+	const std::string NEW = tpath("apply_t_modtrunc1_new");
+	const std::string DELTA = tpath("apply_t_modtrunc1_delta");
+	const std::string OUT = tpath("apply_t_modtrunc1_out");
 
 	// 256 distinct bytes form a single chunk; flipping one byte yields a
 	// MODIFIED entry. Truncating the delta to the first 88 bytes leaves the
@@ -338,10 +350,10 @@ TEST(Apply, truncated_modified_after_header_fails)
 
 TEST(Apply, truncated_modified_at_opcode_boundary_fails)
 {
-	const char* OLD = "apply_t_modtrunc2_old";
-	const char* NEW = "apply_t_modtrunc2_new";
-	const char* DELTA = "apply_t_modtrunc2_delta";
-	const char* OUT = "apply_t_modtrunc2_out";
+	const std::string OLD = tpath("apply_t_modtrunc2_old");
+	const std::string NEW = tpath("apply_t_modtrunc2_new");
+	const std::string DELTA = tpath("apply_t_modtrunc2_delta");
+	const std::string OUT = tpath("apply_t_modtrunc2_out");
 
 	// Two well-separated 1-byte changes produce two 'D' opcodes in the diff.
 	// Truncating between them lets the parser successfully read one opcode and
@@ -380,9 +392,9 @@ TEST(Apply, truncated_modified_at_opcode_boundary_fails)
 
 TEST(Apply, rejects_output_aliasing_old)
 {
-	const char* OLD = "apply_t_alias_old_old";
-	const char* NEW = "apply_t_alias_old_new";
-	const char* DELTA = "apply_t_alias_old_delta";
+	const std::string OLD = tpath("apply_t_alias_old_old");
+	const std::string NEW = tpath("apply_t_alias_old_new");
+	const std::string DELTA = tpath("apply_t_alias_old_delta");
 
 	write_random(OLD, 4096, 0xA1u);
 	write_random(NEW, 4096, 0xA2u);
@@ -408,9 +420,9 @@ TEST(Apply, rejects_output_aliasing_old)
 
 TEST(Apply, rejects_output_aliasing_delta)
 {
-	const char* OLD = "apply_t_alias_delta_old";
-	const char* NEW = "apply_t_alias_delta_new";
-	const char* DELTA = "apply_t_alias_delta_delta";
+	const std::string OLD = tpath("apply_t_alias_delta_old");
+	const std::string NEW = tpath("apply_t_alias_delta_new");
+	const std::string DELTA = tpath("apply_t_alias_delta_delta");
 
 	write_random(OLD, 4096, 0xB1u);
 	write_random(NEW, 4096, 0xB2u);
@@ -437,10 +449,10 @@ TEST(Apply, rejects_output_aliasing_delta)
 
 TEST(Apply, duplicate_removed_entry_rejected)
 {
-	const char* OLD = "apply_t_dupr_old";
-	const char* NEW = "apply_t_dupr_new";
-	const char* DELTA = "apply_t_dupr_delta";
-	const char* OUT = "apply_t_dupr_out";
+	const std::string OLD = tpath("apply_t_dupr_old");
+	const std::string NEW = tpath("apply_t_dupr_new");
+	const std::string DELTA = tpath("apply_t_dupr_delta");
+	const std::string OUT = tpath("apply_t_dupr_out");
 
 	// Empty new + non-empty old yields an all-REMOVED delta. Each REMOVED
 	// entry's header is exactly entry_header_size() bytes, no payload. We
@@ -473,10 +485,10 @@ TEST(Apply, duplicate_removed_entry_rejected)
 
 TEST(Apply, rejects_bad_magic)
 {
-	const char* OLD = "apply_t_badmagic_old";
-	const char* NEW = "apply_t_badmagic_new";
-	const char* DELTA = "apply_t_badmagic_delta";
-	const char* OUT = "apply_t_badmagic_out";
+	const std::string OLD = tpath("apply_t_badmagic_old");
+	const std::string NEW = tpath("apply_t_badmagic_new");
+	const std::string DELTA = tpath("apply_t_badmagic_delta");
+	const std::string OUT = tpath("apply_t_badmagic_out");
 
 	write_random(OLD, 4096, 0xD1u);
 	write_random(NEW, 4096, 0xD2u);
@@ -502,10 +514,10 @@ TEST(Apply, rejects_bad_magic)
 
 TEST(Apply, truncated_partial_header_fails)
 {
-	const char* OLD = "apply_t_trunc_hdr_old";
-	const char* NEW = "apply_t_trunc_hdr_new";
-	const char* DELTA = "apply_t_trunc_hdr_delta";
-	const char* OUT = "apply_t_trunc_hdr_out";
+	const std::string OLD = tpath("apply_t_trunc_hdr_old");
+	const std::string NEW = tpath("apply_t_trunc_hdr_new");
+	const std::string DELTA = tpath("apply_t_trunc_hdr_delta");
+	const std::string OUT = tpath("apply_t_trunc_hdr_out");
 
 	// Empty new + non-empty old yields an all-REMOVED delta with no payloads,
 	// so a short trailing fragment is unambiguously an incomplete next header.
