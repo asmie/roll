@@ -11,6 +11,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <optional>
 #include <span>
@@ -111,10 +112,10 @@ private:
     // Hash function for chunk lookup
     struct ChunkHash {
         size_t operator()(const SignedChunk<typename T::RollingHashType>& chunk) const {
-            // Combine signature and first few hash bytes for unique key
             size_t h1 = std::hash<typename T::RollingHashType>{}(chunk.signature);
-            size_t h2 = chunk.hash.size() >= 8 ?
-                       *reinterpret_cast<const size_t*>(chunk.hash.data()) : 0;
+            size_t h2 = 0;
+            if (chunk.hash.size() >= sizeof(size_t))
+                std::memcpy(&h2, chunk.hash.data(), sizeof(size_t));
             return h1 ^ (h2 << 1);
         }
     };
