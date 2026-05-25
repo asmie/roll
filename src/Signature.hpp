@@ -101,27 +101,21 @@ public:
 				break;
 			bytes_read++;
 			uint8_t byte = static_cast<uint8_t>(b);
-			uint8_t last = chunk.back();
 			chunk.push_back(byte);
 
 			current_fingerprint = fingerprint.compute_next(byte);
 
-			// Adaptive boundary detection based on chunk size
+			// Adaptive boundary detection on the rolling fingerprint: FastCDC-style
+			// normalized chunking with a tighter mask before the target size and a
+			// looser one after, bounded by MIN_CHUNK_SIZE / MAX_CHUNK_SIZE.
 			bool boundary_found = false;
 			if (chunk.size() >= MAX_CHUNK_SIZE) {
-				// Force boundary at maximum chunk size
 				boundary_found = true;
 			} else if (chunk.size() >= MIN_CHUNK_SIZE) {
-				// Use adaptive mask based on chunk size for better small file handling
-				uint32_t mask;
-				if (chunk.size() < 2048) {
-					mask = 0x1FF;  // 1/512 probability for small chunks
-				} else if (chunk.size() < 4096) {
-					mask = 0x7FF;  // 1/2048 probability for medium chunks
-				} else {
-					mask = 0x1FFF; // 1/8192 probability for large chunks
-				}
-				boundary_found = (((last << 8 | byte) & mask) == 0);
+				const uint64_t mask = (chunk.size() < TARGET_CHUNK_SIZE)
+					? 0x3FFFULL   // 1/16384 below target — discourages early cuts
+					: 0x0FFFULL;  // 1/4096  at/above target — encourages cutting near target
+				boundary_found = ((current_fingerprint & mask) == 0);
 			}
 
 			if (boundary_found)					// chunk boundary found

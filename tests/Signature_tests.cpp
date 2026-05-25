@@ -31,10 +31,10 @@ TEST(Signature, generate_signature)
 
 	auto chunks = signatures.get_chunks();
 
-	// With adaptive chunking, we expect more chunks (smaller average size)
-	// The 512KB file should generate between 100-500 chunks with our new algorithm
-	ASSERT_GT(chunks.size(), 100);  // Should have at least 100 chunks
-	ASSERT_LT(chunks.size(), 500);  // Should have less than 500 chunks
+	// 512 KiB input, 8 KiB target average -> ~64 chunks; allow generous slack
+	// for content-dependent boundary distribution.
+	ASSERT_GT(chunks.size(), 16u);
+	ASSERT_LT(chunks.size(), 256u);
 
 	// Verify chunks were created and have valid data
 	ASSERT_GT(chunks[0].signature, 0);
