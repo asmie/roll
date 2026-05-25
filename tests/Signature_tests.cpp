@@ -1,6 +1,7 @@
 #include <limits.h>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <vector>
 #include "gtest/gtest.h"
 
@@ -82,6 +83,55 @@ TEST(Signature, small_file_under_window)
 	EXPECT_EQ(a.get_chunks()[0].chunk_size, data.size());
 
 	std::filesystem::remove(path);
+}
+
+TEST(Signature, shift_invariance_resyncs_after_insertion)
+{
+	// CDC with a rolling fingerprint should re-synchronise after a single-byte
+	// insertion at the start: some tail of the chunks produced over (0x42 +
+	// data) must match a tail of the chunks produced over (data) by content.
+	std::mt19937 rng(0xC0FFEEu);
+	std::vector<uint8_t> data(64 * 1024);
+	for (auto& b : data) b = static_cast<uint8_t>(rng());
+
+	std::vector<uint8_t> shifted;
+	shifted.reserve(data.size() + 1);
+	shifted.push_back(0x42);
+	shifted.insert(shifted.end(), data.begin(), data.end());
+
+	const auto p_data = std::filesystem::temp_directory_path() / "sig_shift_orig";
+	const auto p_shift = std::filesystem::temp_directory_path() / "sig_shift_plus1";
+	write_tmp(p_data, data);
+	write_tmp(p_shift, shifted);
+
+	Signature<RKFinger, BLAKE512> a, b;
+	a.generate_signatures(p_data);
+	b.generate_signatures(p_shift);
+
+	const auto& ca = a.get_chunks();
+	const auto& cb = b.get_chunks();
+	ASSERT_GT(ca.size(), 2u);
+	ASSERT_GT(cb.size(), 2u);
+
+	// Find any (i, j) where b[i].hash == a[j].hash and assert chunks line up
+	// from that point. With a working rolling hash and content-defined
+	// chunking, this match must exist well before either tail runs out.
+	bool found = false;
+	for (size_t j = 0; j < ca.size() && !found; ++j) {
+		for (size_t i = 0; i < cb.size() && !found; ++i) {
+			if (cb[i].hash != ca[j].hash) continue;
+			if (cb.size() - i != ca.size() - j) continue;
+			bool aligned = true;
+			for (size_t k = 0; k < cb.size() - i; ++k) {
+				if (cb[i + k].hash != ca[j + k].hash) { aligned = false; break; }
+			}
+			if (aligned) found = true;
+		}
+	}
+	EXPECT_TRUE(found) << "no resynchronisation found after a 1-byte shift";
+
+	std::filesystem::remove(p_data);
+	std::filesystem::remove(p_shift);
 }
 
 TEST(Signature, regenerate_replaces_previous_chunks)
