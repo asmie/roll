@@ -2,9 +2,11 @@
 #define APPLY_HPP
 
 #include "Delta.hpp"
+#include "DeltaFormat.hpp"
 #include "FileIO.hpp"
 #include "Signature.hpp"
 
+#include <algorithm>
 #include <bit>
 #include <cstdint>
 #include <cstring>
@@ -84,6 +86,9 @@ public:
 			result.error_message = "Failed to create output file: " + output_file_path.string();
 			return result;
 		}
+
+		if (!verifyHeader(delta, result))
+			return result;
 
 		Signature<T, U> old_sig;
 		old_sig.generate_signatures(old_file);
@@ -297,6 +302,26 @@ private:
 		std::vector<uint8_t> computed(hash_size);
 		hash_func.hash(computed, chunk_data);
 		return computed == expected;
+	}
+
+	bool verifyHeader(FileIO& delta, Result& result) {
+		auto buf = delta.read_chunk(DELTA_HEADER_SIZE);
+		if (!buf || buf->size() != DELTA_HEADER_SIZE) {
+			result.error_message = "Truncated delta: missing header";
+			return false;
+		}
+		if (!std::equal(std::begin(DELTA_MAGIC), std::end(DELTA_MAGIC), buf->begin())) {
+			result.error_message = "Bad delta magic";
+			return false;
+		}
+		uint32_t version = 0;
+		for (size_t i = 0; i < sizeof(version); ++i)
+			version = (version << 8) | (*buf)[sizeof(DELTA_MAGIC) + i];
+		if (version != DELTA_FORMAT_VERSION) {
+			result.error_message = "Unsupported delta version: " + std::to_string(version);
+			return false;
+		}
+		return true;
 	}
 
 	bool readU64BE(FileIO& f, uint64_t& out) {

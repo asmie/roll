@@ -471,6 +471,35 @@ TEST(Apply, duplicate_removed_entry_rejected)
 	cleanup({OLD, NEW, DELTA, OUT});
 }
 
+TEST(Apply, rejects_bad_magic)
+{
+	const char* OLD = "apply_t_badmagic_old";
+	const char* NEW = "apply_t_badmagic_new";
+	const char* DELTA = "apply_t_badmagic_delta";
+	const char* OUT = "apply_t_badmagic_out";
+
+	write_random(OLD, 4096, 0xD1u);
+	write_random(NEW, 4096, 0xD2u);
+
+	Signature<RKFinger, BLAKE512> os, ns;
+	os.generate_signatures(OLD);
+	ns.generate_signatures(NEW);
+	Delta<RKFinger, BLAKE512> d;
+	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
+	ASSERT_TRUE(dr.success);
+
+	auto raw = read_all(DELTA);
+	ASSERT_GE(raw.size(), 4u);
+	raw[0] ^= 0xFF;  // corrupt the magic
+	write_bytes(DELTA, raw);
+
+	Apply<RKFinger, BLAKE512> apply;
+	auto ar = apply.apply_delta(OLD, DELTA, OUT);
+	EXPECT_FALSE(ar.success);
+
+	cleanup({OLD, NEW, DELTA, OUT});
+}
+
 TEST(Apply, truncated_partial_header_fails)
 {
 	const char* OLD = "apply_t_trunc_hdr_old";

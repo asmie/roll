@@ -1,5 +1,8 @@
 #include "DeltaViewer.hpp"
 
+#include "DeltaFormat.hpp"
+
+#include <algorithm>
 #include <bit>
 #include <cctype>
 #include <cstdint>
@@ -171,6 +174,25 @@ int view_delta(const std::filesystem::path& delta_file) {
 
 	std::cout << "Delta File Viewer - Analyzing: " << delta_file << std::endl;
 	std::cout << "========================================" << std::endl << std::endl;
+
+	uint8_t header[DELTA_HEADER_SIZE];
+	if (!readExact(file, header, sizeof(header))) {
+		std::cerr << "Error: Truncated delta header" << std::endl;
+		return 1;
+	}
+	if (!std::equal(std::begin(DELTA_MAGIC), std::end(DELTA_MAGIC), header)) {
+		std::cerr << "Error: Bad delta magic" << std::endl;
+		return 1;
+	}
+	uint32_t version = 0;
+	for (size_t i = 0; i < sizeof(version); ++i)
+		version = (version << 8) | header[sizeof(DELTA_MAGIC) + i];
+	std::cout << "Format version: " << version << std::endl << std::endl;
+	if (version != DELTA_FORMAT_VERSION) {
+		std::cerr << "Error: Unsupported delta version " << version
+		          << " (expected " << DELTA_FORMAT_VERSION << ")" << std::endl;
+		return 1;
+	}
 
 	constexpr size_t hashSize = 64; // BLAKE-512
 	int chunkNum = 0;

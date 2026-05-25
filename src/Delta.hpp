@@ -1,6 +1,7 @@
 #ifndef DELTA_HPP
 #define DELTA_HPP
 
+#include "DeltaFormat.hpp"
 #include "Signature.hpp"
 #include "FileIO.hpp"
 
@@ -83,6 +84,9 @@ public:
             return result;
         }
 
+        if (!writeHeader(delta, result))
+            return result;
+
         const auto& original_chunks = original.get_chunks();
         const auto& new_chunks = newfile.get_chunks();
 
@@ -140,6 +144,19 @@ private:
             map[chunks[i]] = i;
         }
         return map;
+    }
+
+    bool writeHeader(FileIO& delta, Result& result) {
+        std::vector<uint8_t> header;
+        header.reserve(DELTA_HEADER_SIZE);
+        header.insert(header.end(), std::begin(DELTA_MAGIC), std::end(DELTA_MAGIC));
+        pushUint32(header, DELTA_FORMAT_VERSION);
+        if (!delta.write_chunk(header)) {
+            result.error_message = "Failed to write delta header";
+            return false;
+        }
+        result.bytes_written += header.size();
+        return true;
     }
 
     /**
