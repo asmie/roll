@@ -45,26 +45,29 @@ class Signature {
 public:
 	/**
 	* Generate signatures by opening the given path and processing its contents.
-	* @param[in] datafile file with data for signatures to be generated
+	* @return False if the path could not be opened, true otherwise (chunks may
+	*         still be empty for a zero-byte file).
 	*/
-	void generate_signatures(const std::filesystem::path& datafile) {
+	bool generate_signatures(const std::filesystem::path& datafile) {
 		FileIO file;
-		if (!file.open(datafile, FileMode::IN))
-			return;
-		generate_signatures(file);
+		if (!file.open(datafile, FileMode::IN)) {
+			chunks.clear();
+			return false;
+		}
+		return generate_signatures(file);
 	}
 
 	/**
 	* Generate signatures by reading from an already-open FileIO. Data is read
 	* from offset 0; the file position at return is unspecified. The FileIO is
 	* not closed by this call.
-	* @param[in] file open FileIO to read from
+	* @return False if `file` is not open, true otherwise.
 	*/
-	void generate_signatures(FileIO& file) {
+	bool generate_signatures(FileIO& file) {
 		chunks.clear();
 
 		if (!file.is_open())
-			return;
+			return false;
 
 		T fingerprint;
 		U hash_func;
@@ -72,7 +75,7 @@ public:
 
 		auto res = file.read_chunk(fingerprint.get_window_size(), 0);
 		if (res->empty())
-			return;
+			return true;  // empty file -> open succeeded, no chunks to emit
 
 		bool full_window = fingerprint.initialize(*res);
 		bytes_read += res->size();
@@ -85,7 +88,7 @@ public:
 		// computed by initialize() and bail — there is nothing to roll.
 		if (!full_window) {
 			emit_chunk(chunk, current_fingerprint, bytes_read - chunk.size(), hash_func);
-			return;
+			return true;
 		}
 
 		bool init = false;
@@ -141,6 +144,7 @@ public:
 
 		if (chunk.size() > 0)									// emit residual chunk at EOF
 			emit_chunk(chunk, current_fingerprint, bytes_read - chunk.size(), hash_func);
+		return true;
 	}
 
 	/**

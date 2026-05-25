@@ -25,8 +25,14 @@ int run_create(const char* old_path, const char* new_path, const char* delta_pat
 	Signature<RKFinger, BLAKE512> old_signature;
 	Signature<RKFinger, BLAKE512> new_signature;
 
-	old_signature.generate_signatures(old_path);
-	new_signature.generate_signatures(new_path);
+	if (!old_signature.generate_signatures(old_path)) {
+		std::cerr << "Failed to read old file: " << old_path << std::endl;
+		return 1;
+	}
+	if (!new_signature.generate_signatures(new_path)) {
+		std::cerr << "Failed to read new file: " << new_path << std::endl;
+		return 1;
+	}
 
 	Delta<RKFinger, BLAKE512> delta;
 	auto result = delta.generate_delta(old_signature, new_signature, old_path, new_path, delta_path);
