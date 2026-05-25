@@ -483,6 +483,37 @@ TEST(Apply, duplicate_removed_entry_rejected)
 	cleanup({OLD, NEW, DELTA, OUT});
 }
 
+TEST(Apply, failed_apply_removes_output_stub)
+{
+	const std::string OLD = tpath("apply_t_nostub_old");
+	const std::string NEW = tpath("apply_t_nostub_new");
+	const std::string DELTA = tpath("apply_t_nostub_delta");
+	const std::string OUT = tpath("apply_t_nostub_out");
+
+	write_random(OLD, 2048, 0xE1u);
+	write_random(NEW, 2048, 0xE2u);
+
+	Signature<RKFinger, BLAKE512> os, ns;
+	os.generate_signatures(OLD);
+	ns.generate_signatures(NEW);
+	Delta<RKFinger, BLAKE512> d;
+	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
+	ASSERT_TRUE(dr.success);
+
+	// Corrupt the header so apply fails after creating the output file.
+	auto raw = read_all(DELTA);
+	raw[0] ^= 0xFF;
+	write_bytes(DELTA, raw);
+
+	Apply<RKFinger, BLAKE512> apply;
+	auto ar = apply.apply_delta(OLD, DELTA, OUT);
+	EXPECT_FALSE(ar.success);
+	EXPECT_FALSE(std::filesystem::exists(OUT))
+		<< "output stub was left on disk after a failed apply";
+
+	cleanup({OLD, NEW, DELTA, OUT});
+}
+
 TEST(Apply, rejects_bad_magic)
 {
 	const std::string OLD = tpath("apply_t_badmagic_old");

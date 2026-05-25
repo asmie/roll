@@ -51,6 +51,25 @@ public:
 	                   const std::filesystem::path& delta_file_path,
 	                   const std::filesystem::path& output_file_path)
 	{
+		bool output_opened = false;
+		Result result = apply_delta_impl(old_file_path, delta_file_path, output_file_path,
+		                                 output_opened);
+		// Don't leave a half-written stub on disk: if we opened the output and
+		// the run failed, remove the file. Alias checks run before open, so we
+		// will never delete the user's old/delta here.
+		if (!result.success && output_opened) {
+			std::error_code ec;
+			std::filesystem::remove(output_file_path, ec);
+		}
+		return result;
+	}
+
+private:
+	Result apply_delta_impl(const std::filesystem::path& old_file_path,
+	                        const std::filesystem::path& delta_file_path,
+	                        const std::filesystem::path& output_file_path,
+	                        bool& output_opened)
+	{
 		Result result{false, "", 0, 0};
 
 		// Reject output paths that alias either input. Opening the output in
@@ -86,6 +105,7 @@ public:
 			result.error_message = "Failed to create output file: " + output_file_path.string();
 			return result;
 		}
+		output_opened = true;
 
 		if (!verifyHeader(delta, result))
 			return result;
@@ -100,6 +120,7 @@ public:
 		U hash_func;
 		const size_t hash_size = hash_func.get_hash_size();
 		size_t new_idx = 0;
+		bool seen_removed = false;
 
 		while (true) {
 			int peek = delta.peek_byte();
@@ -129,7 +150,13 @@ public:
 				return result;
 			}
 
-			switch (static_cast<EntryType>(entry_type_raw)) {
+			const auto entry_type = static_cast<EntryType>(entry_type_raw);
+			if (seen_removed && entry_type != EntryType::REMOVED_CHUNK) {
+				result.error_message = "Non-REMOVED entry after REMOVED";
+				return result;
+			}
+
+			switch (entry_type) {
 				case EntryType::ORIGINAL_CHUNK: {
 					SignedChunk<typename T::RollingHashType> probe;
 					probe.signature = signature;
@@ -224,6 +251,7 @@ public:
 						return result;
 					}
 					original_used[k] = true;
+					seen_removed = true;
 					break;
 				}
 
@@ -246,14 +274,15 @@ public:
 		return result;
 	}
 
-private:
 	struct ChunkHash {
 		size_t operator()(const SignedChunk<typename T::RollingHashType>& c) const {
 			size_t h1 = std::hash<typename T::RollingHashType>{}(c.signature);
 			size_t h2 = 0;
 			if (c.hash.size() >= sizeof(size_t))
 				std::memcpy(&h2, c.hash.data(), sizeof(size_t));
-			return h1 ^ (h2 << 1);
+			// boost::hash_combine-style mix — `h1 ^ (h2 << 1)` collided too
+			// easily on adjacent signatures with similar hash prefixes.
+			return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
 		}
 	};
 
