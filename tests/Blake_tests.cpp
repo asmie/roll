@@ -67,3 +67,59 @@ TEST(blake2b, multi_block_input)
 	for (int i = 0; i < 64; i++)
 		ASSERT_EQ(out[i], out2[i]);
 }
+
+TEST(blake2b, streaming_matches_oneshot)
+{
+	// Hashing the full message in one call must match feeding the same bytes
+	// through init/update/finalize in odd-sized chunks that straddle block
+	// boundaries.
+	std::vector<uint8_t> input(500);
+	for (size_t i = 0; i < input.size(); ++i)
+		input[i] = static_cast<uint8_t>(i * 31u + 5u);
+
+	BLAKE2b one_shot;
+	uint8_t expected[64];
+	one_shot.hash(expected, input.data(), input.size());
+
+	BLAKE2b streamed;
+	uint8_t got[64];
+	streamed.init();
+	// Feed in 1, 1, 126, 127, 128, then the remainder — exercises the
+	// pre-block buffer, exact-block paths, and multi-block update.
+	size_t off = 0;
+	for (size_t step : {size_t{1}, size_t{1}, size_t{126}, size_t{127}, size_t{128}}) {
+		streamed.update(std::span<const uint8_t>{input.data() + off, step});
+		off += step;
+	}
+	streamed.update(std::span<const uint8_t>{input.data() + off, input.size() - off});
+	streamed.finalize(got);
+
+	for (int i = 0; i < 64; i++)
+		ASSERT_EQ(got[i], expected[i]) << "byte " << i;
+}
+
+TEST(blake2b, reinit_resets_state)
+{
+	// A second init() must wipe prior state so the same instance hashes a new
+	// message correctly.
+	BLAKE2b hash;
+	std::vector<uint8_t> noise(300, 0xAA);
+	uint8_t scratch[64];
+	hash.init();
+	hash.update(noise);
+	hash.finalize(scratch);  // discard
+
+	const uint8_t input[3] = { 'a', 'b', 'c' };
+	const uint8_t expected[64] = {
+		0xba, 0x80, 0xa5, 0x3f, 0x98, 0x1c, 0x4d, 0x0d, 0x6a, 0x27, 0x97, 0xb6, 0x9f, 0x12, 0xf6, 0xe9,
+		0x4c, 0x21, 0x2f, 0x14, 0x68, 0x5a, 0xc4, 0xb7, 0x4b, 0x12, 0xbb, 0x6f, 0xdb, 0xff, 0xa2, 0xd1,
+		0x7d, 0x87, 0xc5, 0x39, 0x2a, 0xab, 0x79, 0x2d, 0xc2, 0x52, 0xd5, 0xde, 0x45, 0x33, 0xcc, 0x95,
+		0x18, 0xd3, 0x8a, 0xa8, 0xdb, 0xf1, 0x92, 0x5a, 0xb9, 0x23, 0x86, 0xed, 0xd4, 0x00, 0x99, 0x23,
+	};
+	uint8_t got[64];
+	hash.init();
+	hash.update(input);
+	hash.finalize(got);
+	for (int i = 0; i < 64; i++)
+		ASSERT_EQ(got[i], expected[i]) << "byte " << i;
+}

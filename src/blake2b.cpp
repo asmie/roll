@@ -29,14 +29,6 @@ constexpr uint8_t SIGMA[12][16] = {
 	{ 14, 10,  4,  8,  9, 15, 13,  6,  1, 12,  0,  2, 11,  7,  5,  3 },
 };
 
-struct State {
-	uint64_t h[8];
-	uint64_t t[2];
-	uint64_t f[2];
-	uint8_t  buf[128];
-	size_t   buflen;
-};
-
 inline uint64_t rotr64(uint64_t x, unsigned n) noexcept
 {
 	return (x >> n) | (x << (64 - n));
@@ -54,19 +46,19 @@ inline uint64_t load64_le(const uint8_t* p) noexcept
 	     | (static_cast<uint64_t>(p[7]) << 56);
 }
 
-void compress(State& s, const uint8_t* block) noexcept
+void compress(uint64_t h[8], uint64_t t[2], uint64_t f[2], const uint8_t block[128]) noexcept
 {
 	uint64_t m[16];
 	for (int i = 0; i < 16; i++)
 		m[i] = load64_le(block + i * 8);
 
 	uint64_t v[16];
-	for (int i = 0; i < 8; i++) v[i]     = s.h[i];
+	for (int i = 0; i < 8; i++) v[i]     = h[i];
 	for (int i = 0; i < 8; i++) v[i + 8] = IV[i];
-	v[12] ^= s.t[0];
-	v[13] ^= s.t[1];
-	v[14] ^= s.f[0];
-	v[15] ^= s.f[1];
+	v[12] ^= t[0];
+	v[13] ^= t[1];
+	v[14] ^= f[0];
+	v[15] ^= f[1];
 
 	auto G = [&](unsigned a, unsigned b, unsigned c, unsigned d, uint64_t x, uint64_t y) {
 		v[a] = v[a] + v[b] + x;
@@ -92,76 +84,71 @@ void compress(State& s, const uint8_t* block) noexcept
 	}
 
 	for (int i = 0; i < 8; i++)
-		s.h[i] ^= v[i] ^ v[i + 8];
-}
-
-void init(State& s, size_t outlen) noexcept
-{
-	for (int i = 0; i < 8; i++) s.h[i] = IV[i];
-	// Parameter block (sequential, no key/salt/personal): outlen | (key=0)<<8 | (fanout=1)<<16 | (depth=1)<<24
-	s.h[0] ^= 0x01010000ULL | static_cast<uint64_t>(outlen);
-	s.t[0] = s.t[1] = 0;
-	s.f[0] = s.f[1] = 0;
-	s.buflen = 0;
-}
-
-void update(State& s, const uint8_t* in, size_t inlen) noexcept
-{
-	if (inlen == 0) return;
-
-	const size_t left = s.buflen;
-	const size_t fill = 128 - left;
-
-	if (inlen > fill) {
-		std::memcpy(s.buf + left, in, fill);
-		s.t[0] += 128;
-		if (s.t[0] < 128) s.t[1] += 1;
-		compress(s, s.buf);
-		in += fill;
-		inlen -= fill;
-		s.buflen = 0;
-
-		while (inlen > 128) {
-			s.t[0] += 128;
-			if (s.t[0] < 128) s.t[1] += 1;
-			compress(s, in);
-			in += 128;
-			inlen -= 128;
-		}
-	}
-
-	std::memcpy(s.buf + s.buflen, in, inlen);
-	s.buflen += inlen;
-}
-
-void finalize(State& s, uint8_t* out, size_t outlen) noexcept
-{
-	s.t[0] += s.buflen;
-	if (s.t[0] < s.buflen) s.t[1] += 1;
-	s.f[0] = ~0ULL;
-	for (size_t i = s.buflen; i < 128; i++) s.buf[i] = 0;
-	compress(s, s.buf);
-
-	for (size_t i = 0; i < outlen; i++)
-		out[i] = static_cast<uint8_t>(s.h[i / 8] >> ((i % 8) * 8));
+		h[i] ^= v[i] ^ v[i + 8];
 }
 
 } // namespace
 
-void BLAKE2b::hash(std::span<uint8_t> out, std::span<const uint8_t> in)
+void BLAKE2b::init()
 {
-	if (out.size() < get_hash_size())
+	for (int i = 0; i < 8; i++) h_[i] = IV[i];
+	// Parameter block (sequential, no key/salt/personal): outlen | fanout<<16 | depth<<24.
+	h_[0] ^= 0x01010000ULL | static_cast<uint64_t>(HASH_SIZE);
+	t_[0] = t_[1] = 0;
+	f_[0] = f_[1] = 0;
+	buflen_ = 0;
+}
+
+void BLAKE2b::update(std::span<const uint8_t> in)
+{
+	if (in.empty()) return;
+
+	const uint8_t* p = in.data();
+	size_t inlen = in.size();
+	const size_t left = buflen_;
+	const size_t fill = BLOCK_SIZE - left;
+
+	if (inlen > fill) {
+		std::memcpy(buf_ + left, p, fill);
+		t_[0] += BLOCK_SIZE;
+		if (t_[0] < BLOCK_SIZE) t_[1] += 1;
+		compress(h_, t_, f_, buf_);
+		p += fill;
+		inlen -= fill;
+		buflen_ = 0;
+
+		while (inlen > BLOCK_SIZE) {
+			t_[0] += BLOCK_SIZE;
+			if (t_[0] < BLOCK_SIZE) t_[1] += 1;
+			compress(h_, t_, f_, p);
+			p += BLOCK_SIZE;
+			inlen -= BLOCK_SIZE;
+		}
+	}
+
+	std::memcpy(buf_ + buflen_, p, inlen);
+	buflen_ += inlen;
+}
+
+void BLAKE2b::finalize(std::span<uint8_t> out)
+{
+	if (out.size() < HASH_SIZE)
 		return;
-	State s;
-	init(s, get_hash_size());
-	update(s, in.data(), in.size());
-	finalize(s, out.data(), get_hash_size());
+
+	t_[0] += buflen_;
+	if (t_[0] < buflen_) t_[1] += 1;
+	f_[0] = ~0ULL;
+	for (size_t i = buflen_; i < BLOCK_SIZE; i++) buf_[i] = 0;
+	compress(h_, t_, f_, buf_);
+
+	for (size_t i = 0; i < HASH_SIZE; i++)
+		out[i] = static_cast<uint8_t>(h_[i / 8] >> ((i % 8) * 8));
 }
 
 void BLAKE2b::hash(uint8_t* out, const uint8_t* in, uint64_t inlen)
 {
 	if (out == nullptr || (in == nullptr && inlen != 0))
 		return;
-	hash(std::span<uint8_t>{out, get_hash_size()},
-	     std::span<const uint8_t>{in, static_cast<size_t>(inlen)});
+	IHash::hash(std::span<uint8_t>{out, HASH_SIZE},
+	            std::span<const uint8_t>{in, static_cast<size_t>(inlen)});
 }
