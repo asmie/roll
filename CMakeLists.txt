@@ -31,21 +31,78 @@ if (RH_ENABLE_ASAN AND NOT MSVC)
     add_link_options(-fsanitize=address,undefined)
 endif()
 
-# Checking time
-include (CheckIncludeFileCXX)
-include (CheckCXXSymbolExists)
+# ---- Compile-environment probing -----------------------------------------
+#
+# CheckIncludeFileCXX / CheckCXXSourceCompiles invoke the compiler, so they
+# must honor CMAKE_CXX_STANDARD set above (otherwise <bit>/<span>/concepts
+# are probed without -std=c++23 and the check fails on every toolchain).
 
-check_include_file_cxx (cstdlib RH_SYSTEM_HAVE_CSTDLIB)
-check_include_file_cxx (cstdio RH_SYSTEM_HAVE_CSTDIO)
-check_include_file_cxx (iostream RH_SYSTEM_HAVE_IOSTREAM)
-check_include_file_cxx (cstring RH_SYSTEM_HAVE_CSTRING)
+cmake_policy(SET CMP0067 NEW)
+include(CheckIncludeFileCXX)
+include(CheckCXXSourceCompiles)
 
+# Headers used by the production sources.
+foreach(_h
+        algorithm atomic bit cctype climits concepts cstddef cstdint cstdio
+        cstdlib cstring filesystem fstream iomanip iostream limits span sstream
+        stdexcept string string_view system_error unordered_map utility vector)
+    string(TOUPPER "${_h}" _H)
+    check_include_file_cxx(${_h} RH_HAVE_${_H})
+endforeach()
+
+# C++17/20/23 library symbols the project actually depends on. We probe by
+# compiling a tiny program that *uses* the symbol — qualified namespace
+# names can't be checked with check_cxx_symbol_exists.
+check_cxx_source_compiles("
+    #include <bit>
+    #include <cstdint>
+    int main() { return static_cast<int>(std::byteswap<std::uint32_t>(0)); }
+" RH_HAVE_STD_BYTESWAP)
+
+check_cxx_source_compiles("
+    #include <bit>
+    int main() {
+        return std::endian::native == std::endian::little ? 0 : 1;
+    }
+" RH_HAVE_STD_ENDIAN)
+
+check_cxx_source_compiles("
+    #include <span>
+    #include <cstdint>
+    int main() {
+        std::uint8_t a[4]{};
+        std::span<std::uint8_t> s(a, 4);
+        return static_cast<int>(s.size());
+    }
+" RH_HAVE_STD_SPAN)
+
+check_cxx_source_compiles("
+    #include <filesystem>
+    int main() {
+        std::filesystem::path p(\"x\");
+        return p.empty() ? 0 : 1;
+    }
+" RH_HAVE_STD_FILESYSTEM)
+
+check_cxx_source_compiles("
+    #include <utility>
+    enum class E { X };
+    int main() { return static_cast<int>(std::to_underlying(E::X)); }
+" RH_HAVE_STD_TO_UNDERLYING)
+
+check_cxx_source_compiles("
+    #include <concepts>
+    struct B {};
+    struct D : B {};
+    template<class T> requires std::derived_from<T, B> int f(T) { return 0; }
+    int main() { return f(D{}); }
+" RH_HAVE_STD_CONCEPTS_DERIVED_FROM)
 
 # Configuration file
-configure_file (
-  "${PROJECT_SOURCE_DIR}/src/rh_config.h.in"
-  "generated/rh_config.h"
-  )
+configure_file(
+    "${PROJECT_SOURCE_DIR}/src/rh_config.h.in"
+    "generated/rh_config.h"
+)
 
 
 # Production sources (explicit list — new files require re-running CMake anyway,
