@@ -74,10 +74,12 @@ public:
         const auto& original_chunks = original.get_chunks();
         const auto& new_chunks = newfile.get_chunks();
 
-        // Build hash map for O(1) chunk lookups
         auto chunk_map = buildChunkMap(original_chunks);
-        const bool ok = processMultipleChunks(original_chunks, new_chunks, chunk_map,
-                                              old, file, delta, result);
+        bool ok = processMultipleChunks(original_chunks, new_chunks, chunk_map,
+                                        old, file, delta, result);
+
+        if (ok)
+            ok = writeTrailer(file, delta, result);
 
         old.close();
         file.close();
@@ -122,6 +124,36 @@ private:
             map[chunks[i]] = i;
         }
         return map;
+    }
+
+    // Stream-hash the entire new-file content in fixed-size buffers and emit
+    // (DELTA_TRAILER_TAG | hash) so the applier can verify end-to-end
+    // reconstruction, not just per-chunk hashes.
+    bool writeTrailer(FileIO& file, FileIO& delta, Result& result) {
+        U hash_func;
+        hash_func.init();
+
+        constexpr size_t STREAM_CHUNK = 64 * 1024;
+        auto buf = file.read_chunk(STREAM_CHUNK, 0);
+        while (!buf.empty()) {
+            hash_func.update(buf);
+            buf = file.read_chunk(STREAM_CHUNK);
+        }
+
+        std::vector<uint8_t> digest(hash_func.get_hash_size());
+        hash_func.finalize(digest);
+
+        const uint8_t tag = DELTA_TRAILER_TAG;
+        if (!delta.write_chunk(std::span<const uint8_t>{&tag, 1})) {
+            result.error_message = "Failed to write trailer tag";
+            return false;
+        }
+        if (!delta.write_chunk(digest)) {
+            result.error_message = "Failed to write trailer hash";
+            return false;
+        }
+        result.bytes_written += 1 + digest.size();
+        return true;
     }
 
     bool writeHeader(FileIO& delta, Result& result) {

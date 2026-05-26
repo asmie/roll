@@ -187,10 +187,25 @@ int view_delta(const std::filesystem::path& delta_file) {
 		return 1;
 	}
 
-	constexpr size_t hashSize = 64; // delta v1 ⇒ BLAKE-512
+	constexpr size_t hashSize = 64; // delta v2+ ⇒ BLAKE2b-512
 	int chunkNum = 0;
 	while (true) {
-		if (file.peek() == EOF) break;
+		const int peek = file.peek();
+		if (peek == EOF) break;
+		if (peek == DELTA_TRAILER_TAG) {
+			file.get();  // consume tag
+			std::vector<uint8_t> trailer(hashSize);
+			if (!readExact(file, trailer.data(), hashSize)) {
+				std::cerr << "Error: Truncated whole-file trailer" << std::endl;
+				return 1;
+			}
+			std::cout << "Whole-file hash: ";
+			for (uint8_t b : trailer)
+				std::cout << std::hex << std::setw(2) << std::setfill('0')
+				          << static_cast<int>(b);
+			std::cout << std::dec << std::endl;
+			break;
+		}
 
 		uint64_t entryType;
 		if (!readUint64(file, entryType)) {

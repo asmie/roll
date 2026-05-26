@@ -471,10 +471,13 @@ TEST(Apply, duplicate_removed_entry_rejected)
 	ASSERT_TRUE(dr.success);
 
 	const size_t header_size = entry_header_size();
+	constexpr size_t trailer_size = 1 + BLAKE2b::HASH_SIZE;
 	auto raw = read_all(DELTA);
-	ASSERT_GE(raw.size(), header_size);
-	// Append a copy of the last REMOVED entry — duplicate consumption attempt.
-	raw.insert(raw.end(), raw.end() - header_size, raw.end());
+	ASSERT_GE(raw.size(), trailer_size + header_size);
+	// Duplicate the last REMOVED entry, inserted before the trailer so the
+	// parser sees it as another entry rather than skipping past EOF.
+	raw.insert(raw.end() - trailer_size,
+	           raw.end() - trailer_size - header_size, raw.end() - trailer_size);
 	write_bytes(DELTA, raw);
 
 	Apply<RKFinger, BLAKE2b> apply;
@@ -635,10 +638,69 @@ TEST(Apply, truncated_partial_header_fails)
 	ASSERT_TRUE(dr.success);
 
 	auto raw = read_all(DELTA);
-	raw.push_back(0x00);
-	raw.push_back(0x01);
-	raw.push_back(0x02);
-	raw.push_back(0x03);
+	constexpr size_t trailer_size = 1 + BLAKE2b::HASH_SIZE;
+	const uint8_t partial[] = {0x00, 0x01, 0x02, 0x03};  // < 8 bytes of u64 entry_type
+	raw.insert(raw.end() - trailer_size, std::begin(partial), std::end(partial));
+	write_bytes(DELTA, raw);
+
+	Apply<RKFinger, BLAKE2b> apply;
+	auto ar = apply.apply_delta(OLD, DELTA, OUT);
+	EXPECT_FALSE(ar.success);
+
+	cleanup({OLD, NEW, DELTA, OUT});
+}
+
+TEST(Apply, rejects_missing_trailer)
+{
+	const std::string OLD = tpath("apply_t_no_trail_old");
+	const std::string NEW = tpath("apply_t_no_trail_new");
+	const std::string DELTA = tpath("apply_t_no_trail_delta");
+	const std::string OUT = tpath("apply_t_no_trail_out");
+
+	write_random(OLD, 4096, 0xA0u);
+	write_random(NEW, 4096, 0xA1u);
+
+	Signature<RKFinger, BLAKE2b> os, ns;
+	os.generate_signatures(OLD);
+	ns.generate_signatures(NEW);
+	Delta<RKFinger, BLAKE2b> d;
+	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
+	ASSERT_TRUE(dr.success);
+
+	// Strip the trailer (1 tag + hash_size).
+	auto raw = read_all(DELTA);
+	constexpr size_t trailer_size = 1 + BLAKE2b::HASH_SIZE;
+	ASSERT_GT(raw.size(), trailer_size);
+	raw.resize(raw.size() - trailer_size);
+	write_bytes(DELTA, raw);
+
+	Apply<RKFinger, BLAKE2b> apply;
+	auto ar = apply.apply_delta(OLD, DELTA, OUT);
+	EXPECT_FALSE(ar.success);
+
+	cleanup({OLD, NEW, DELTA, OUT});
+}
+
+TEST(Apply, rejects_corrupted_whole_file_trailer)
+{
+	const std::string OLD = tpath("apply_t_trail_corrupt_old");
+	const std::string NEW = tpath("apply_t_trail_corrupt_new");
+	const std::string DELTA = tpath("apply_t_trail_corrupt_delta");
+	const std::string OUT = tpath("apply_t_trail_corrupt_out");
+
+	write_random(OLD, 4096, 0xA2u);
+	write_random(NEW, 4096, 0xA3u);
+
+	Signature<RKFinger, BLAKE2b> os, ns;
+	os.generate_signatures(OLD);
+	ns.generate_signatures(NEW);
+	Delta<RKFinger, BLAKE2b> d;
+	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
+	ASSERT_TRUE(dr.success);
+
+	// Flip a byte inside the trailer hash.
+	auto raw = read_all(DELTA);
+	raw.back() ^= 0xFF;
 	write_bytes(DELTA, raw);
 
 	Apply<RKFinger, BLAKE2b> apply;

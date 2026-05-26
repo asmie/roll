@@ -122,9 +122,29 @@ private:
 		size_t new_idx = 0;
 		bool seen_removed = false;
 
+		U whole_file_hash;
+		whole_file_hash.init();
+		bool saw_trailer = false;
+
 		while (true) {
 			int peek = delta.peek_byte();
 			if (peek == EOF) break;
+			if (peek == DELTA_TRAILER_TAG) {
+				(void) delta.read_byte();
+				auto trailer = delta.read_chunk(hash_size);
+				if (trailer.size() != hash_size) {
+					result.error_message = "Truncated delta: short trailer";
+					return result;
+				}
+				std::vector<uint8_t> computed(hash_size);
+				whole_file_hash.finalize(computed);
+				if (computed != trailer) {
+					result.error_message = "Whole-file hash mismatch";
+					return result;
+				}
+				saw_trailer = true;
+				break;
+			}
 
 			uint64_t entry_type_raw;
 			if (!readU64BE(delta, entry_type_raw)) {
@@ -180,6 +200,7 @@ private:
 						result.error_message = "Failed to write output chunk";
 						return result;
 					}
+					whole_file_hash.update(data);
 					original_used[k] = true;
 					result.bytes_written += data.size();
 					new_idx++;
@@ -200,6 +221,7 @@ private:
 						result.error_message = "Failed to write output chunk";
 						return result;
 					}
+					whole_file_hash.update(payload);
 					result.bytes_written += payload.size();
 					new_idx++;
 					break;
@@ -229,6 +251,7 @@ private:
 						result.error_message = "Failed to write output chunk";
 						return result;
 					}
+					whole_file_hash.update(reconstructed);
 					original_used[new_idx] = true;
 					result.bytes_written += reconstructed.size();
 					new_idx++;
@@ -261,6 +284,11 @@ private:
 			}
 
 			result.entries_processed++;
+		}
+
+		if (!saw_trailer) {
+			result.error_message = "Missing delta trailer";
+			return result;
 		}
 
 		old_file.close();
