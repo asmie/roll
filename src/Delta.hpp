@@ -238,7 +238,7 @@ private:
                                                new_chunks[i].start_offset);
 
                 if (!old_data.empty() && !new_data.empty()) {
-                    entry.chunk_data_raw = createOptimizedDiff(old_data, new_data);
+                    entry.chunk_data_raw = createDiff(old_data, new_data);
                     is_modification = true;
                     original_used[i] = true;
                 }
@@ -269,68 +269,202 @@ private:
         return true;
     }
 
-    /**
-    * Create optimized diff using run-length encoding for sequences
-    *
-    * Format: 'D' <position:4> <count:1> <bytes...>
-    * This efficiently encodes up to 255 consecutive changes in 6+n bytes
-    * instead of the original 6 bytes per change.
-    */
-    std::vector<uint8_t> createOptimizedDiff(const std::vector<uint8_t>& old_data,
-                                            const std::vector<uint8_t>& new_data) {
-        std::vector<uint8_t> diff;
-        diff.reserve(std::min(old_data.size(), new_data.size()) / 4); // Estimate
+    // Produce a diff from old_data to new_data. Tries an optimal-SES Myers
+    // diff first (Eugene W. Myers, 1986, "An O(ND) Difference Algorithm");
+    // falls back to a fast greedy diff if D exceeds a memory cap. Both
+    // emit the same D/I/X opcode format the applier consumes.
+    std::vector<uint8_t> createDiff(const std::vector<uint8_t>& old_data,
+                                    const std::vector<uint8_t>& new_data) {
+        constexpr size_t D_LIMIT = 2048;
+        std::vector<int8_t> ses;
+        if (myersSES(old_data, new_data, D_LIMIT, ses))
+            return emitOpcodesFromSES(old_data, new_data, ses);
+        return createGreedyDiff(old_data, new_data);
+    }
 
+    // Myers' O(ND) shortest-edit-script. On success fills `out_ses` with one
+    // entry per source position: -1 = delete a[x], +1 = insert b[y], 0 =
+    // equal byte (advance both). Returns false (without modifying out_ses)
+    // if the edit distance exceeds d_limit.
+    bool myersSES(const std::vector<uint8_t>& a,
+                  const std::vector<uint8_t>& b,
+                  size_t d_limit,
+                  std::vector<int8_t>& out_ses) {
+        const int N = static_cast<int>(a.size());
+        const int M = static_cast<int>(b.size());
+
+        if (N == 0 && M == 0) { out_ses.clear(); return true; }
+        if (N == 0) { out_ses.assign(M, +1); return true; }
+        if (M == 0) { out_ses.assign(N, -1); return true; }
+
+        const int max_total = N + M;
+        const int d_max = std::min(max_total, static_cast<int>(d_limit));
+        const int offset = d_max;
+        const int v_size = 2 * d_max + 1;
+
+        std::vector<int> v(v_size, 0);
+        std::vector<std::vector<int>> trace;
+        trace.reserve(static_cast<size_t>(d_max) + 1);
+
+        int final_d = -1;
+        for (int d = 0; d <= d_max && final_d < 0; d++) {
+            for (int k = -d; k <= d; k += 2) {
+                const bool from_above = (k == -d) ||
+                    (k != d && v[offset + k - 1] < v[offset + k + 1]);
+                int x = from_above ? v[offset + k + 1] : v[offset + k - 1] + 1;
+                int y = x - k;
+                while (x < N && y < M && a[x] == b[y]) { x++; y++; }
+                v[offset + k] = x;
+                if (x >= N && y >= M) {
+                    final_d = d;
+                    break;
+                }
+            }
+            trace.push_back(v);
+        }
+
+        if (final_d < 0)
+            return false;  // edit distance exceeded the cap
+
+        // Backtrack the trace to produce the SES in reverse, then reverse it.
+        out_ses.clear();
+        out_ses.reserve(static_cast<size_t>(N + M));
+        int x = N, y = M;
+        for (int d = final_d; d > 0; d--) {
+            const auto& vp = trace[d - 1];
+            const int k = x - y;
+            const bool came_from_above = (k == -d) ||
+                (k != d && vp[offset + k - 1] < vp[offset + k + 1]);
+            const int prev_k = came_from_above ? k + 1 : k - 1;
+            const int prev_x = vp[offset + prev_k];
+            const int prev_y = prev_x - prev_k;
+
+            // Unwind the diagonal snake before the edit step.
+            while (x > prev_x && y > prev_y) {
+                out_ses.push_back(0);
+                x--; y--;
+            }
+            // Unwind the single edit step.
+            if (came_from_above) {
+                out_ses.push_back(+1);
+                y--;
+            } else {
+                out_ses.push_back(-1);
+                x--;
+            }
+        }
+        // Initial snake from (0,0) up to the first edit.
+        while (x > 0 && y > 0) {
+            out_ses.push_back(0);
+            x--; y--;
+        }
+        std::reverse(out_ses.begin(), out_ses.end());
+        return true;
+    }
+
+    // Walk the SES and emit D/I/X opcodes. Adjacent inserts/deletes between
+    // two equal runs are coalesced into one block; balanced delete+insert
+    // blocks become D (replace-in-place); otherwise X for deletes and I for
+    // inserts. All payload counts are u8-split.
+    std::vector<uint8_t> emitOpcodesFromSES(const std::vector<uint8_t>& /*old_data*/,
+                                            const std::vector<uint8_t>& new_data,
+                                            const std::vector<int8_t>& ses) {
+        std::vector<uint8_t> diff;
+        size_t y = 0;
+        size_t i = 0;
+
+        while (i < ses.size()) {
+            if (ses[i] == 0) { ++i; ++y; continue; }
+
+            // Block of consecutive non-equal SES entries.
+            const size_t block_start_y = y;
+            size_t deletes = 0;
+            std::vector<uint8_t> inserts;
+            while (i < ses.size() && ses[i] != 0) {
+                if (ses[i] == -1) {
+                    ++deletes;
+                } else {
+                    inserts.push_back(new_data[y++]);
+                }
+                ++i;
+            }
+
+            emitBlock(diff, block_start_y, deletes, inserts);
+        }
+        return diff;
+    }
+
+    // Emit one logical change block. Caller has already pinned new-position.
+    void emitBlock(std::vector<uint8_t>& diff, size_t pos,
+                   size_t deletes, const std::vector<uint8_t>& inserts) {
+        if (deletes > 0 && deletes == inserts.size()) {
+            emitInlineBytes(diff, 'D', pos, inserts);
+        } else {
+            if (deletes > 0) {
+                diff.push_back('X');
+                pushUint32(diff, static_cast<uint32_t>(pos));
+                pushUint32(diff, static_cast<uint32_t>(deletes));
+            }
+            if (!inserts.empty())
+                emitInlineBytes(diff, 'I', pos, inserts);
+        }
+    }
+
+    // Emit a D or I opcode stream for `bytes`, splitting on the u8 count cap.
+    void emitInlineBytes(std::vector<uint8_t>& diff, char op,
+                         size_t pos, const std::vector<uint8_t>& bytes) {
+        size_t off = 0;
+        while (off < bytes.size()) {
+            const size_t count = std::min<size_t>(255, bytes.size() - off);
+            diff.push_back(static_cast<uint8_t>(op));
+            pushUint32(diff, static_cast<uint32_t>(pos + off));
+            diff.push_back(static_cast<uint8_t>(count));
+            diff.insert(diff.end(), bytes.begin() + off, bytes.begin() + off + count);
+            off += count;
+        }
+    }
+
+    // Fallback greedy diff used when the Myers edit distance exceeds D_LIMIT.
+    // Produces a correct (but suboptimal) opcode stream in O(N+M).
+    std::vector<uint8_t> createGreedyDiff(const std::vector<uint8_t>& old_data,
+                                          const std::vector<uint8_t>& new_data) {
+        std::vector<uint8_t> diff;
         size_t i = 0, j = 0;
 
         while (i < old_data.size() && j < new_data.size()) {
-            // Find runs of matching bytes
             while (i < old_data.size() && j < new_data.size() &&
                    old_data[i] == new_data[j]) {
-                i++;
-                j++;
+                i++; j++;
             }
-
-            // Find runs of differences
             size_t diff_start = i;
             std::vector<uint8_t> diff_bytes;
             while (i < old_data.size() && j < new_data.size() &&
                    old_data[i] != new_data[j] && diff_bytes.size() < 255) {
                 diff_bytes.push_back(new_data[j]);
-                i++;
-                j++;
+                i++; j++;
             }
-
-            // Encode differences if any
             if (!diff_bytes.empty()) {
-                // Format: 'D' <position:4> <count:1> <bytes...>
                 diff.push_back('D');
-                pushUint32(diff, diff_start);
+                pushUint32(diff, static_cast<uint32_t>(diff_start));
                 diff.push_back(static_cast<uint8_t>(diff_bytes.size()));
                 diff.insert(diff.end(), diff_bytes.begin(), diff_bytes.end());
             }
         }
 
-        // Handle remaining bytes
         if (i < old_data.size()) {
-            // Deletions
             diff.push_back('X');
-            pushUint32(diff, i);
-            pushUint32(diff, old_data.size() - i);
+            pushUint32(diff, static_cast<uint32_t>(i));
+            pushUint32(diff, static_cast<uint32_t>(old_data.size() - i));
         }
-
-        // Additions: emit one or more 'I' opcodes since count is u8-bounded.
         while (j < new_data.size()) {
             size_t count = std::min(size_t(255), new_data.size() - j);
             diff.push_back('I');
-            pushUint32(diff, j);
+            pushUint32(diff, static_cast<uint32_t>(j));
             diff.push_back(static_cast<uint8_t>(count));
-            for (size_t k = 0; k < count; ++k) {
+            for (size_t k = 0; k < count; ++k)
                 diff.push_back(new_data[j + k]);
-            }
             j += count;
         }
-
         return diff;
     }
 

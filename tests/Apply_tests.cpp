@@ -223,6 +223,38 @@ TEST(Apply, in_chunk_modification_dwords)
 	cleanup({OLD, NEW, DELTA, OUT});
 }
 
+TEST(Apply, myers_delete_at_start_yields_tiny_delta)
+{
+	// Single-byte deletion at the start of a chunk: a proper SES-based diff
+	// produces an X(0,1) opcode plus an unchanged-tail match copy — total
+	// diff payload of ~9 bytes regardless of chunk size. The greedy diff
+	// produced a full-chunk D + trailing X for this case.
+	const std::string OLD = tpath("apply_t_myers_shift_old");
+	const std::string NEW = tpath("apply_t_myers_shift_new");
+	const std::string DELTA = tpath("apply_t_myers_shift_delta");
+	const std::string OUT = tpath("apply_t_myers_shift_out");
+
+	std::vector<uint8_t> data(256);
+	for (size_t i = 0; i < data.size(); ++i)
+		data[i] = static_cast<uint8_t>(i);
+	write_bytes(OLD, data);
+
+	std::vector<uint8_t> shifted(data.begin() + 1, data.end());
+	write_bytes(NEW, shifted);
+
+	std::string err;
+	ASSERT_TRUE(roundtrip(OLD, NEW, DELTA, OUT, &err)) << err;
+	EXPECT_EQ(read_all(NEW), read_all(OUT));
+
+	// Header (8) + entry header (88) + X opcode (9) + trailer (65) = 170.
+	// Allow some slack for chunking edge cases but assert the delta is small
+	// compared to the chunk size.
+	const auto delta_size = read_all(DELTA).size();
+	EXPECT_LT(delta_size, 200u) << "delta unexpectedly large: " << delta_size;
+
+	cleanup({OLD, NEW, DELTA, OUT});
+}
+
 TEST(Apply, in_chunk_deletion_consumes_x_opcode)
 {
 	const std::string OLD = tpath("apply_t_xop_old");
