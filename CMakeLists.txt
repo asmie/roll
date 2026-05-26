@@ -127,13 +127,14 @@ set(RH_TEST_SOURCES
 include_directories(src ${CMAKE_CURRENT_BINARY_DIR}/generated)
 
 # Find packages
-# # Threads
 find_package(Threads REQUIRED)
+# OpenSSL 1.1.0+ exposes EVP_blake2b512(); modern distros ship 3.x.
+find_package(OpenSSL 1.1.0 REQUIRED)
 
 # Create executable
 add_executable(${PROJECT_NAME} ${RH_SOURCES} src/main.cpp)
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_23)
-target_link_libraries(${PROJECT_NAME} Threads::Threads ${ADDITIONAL_LIBRARIES})
+target_link_libraries(${PROJECT_NAME} Threads::Threads OpenSSL::Crypto ${ADDITIONAL_LIBRARIES})
 
 # Testing time
 enable_testing()
@@ -149,5 +150,5 @@ FetchContent_MakeAvailable(googletest)
 include(GoogleTest)
 add_executable(${PROJECT_NAME}_unit ${RH_TEST_SOURCES} ${RH_SOURCES})
 target_compile_features(${PROJECT_NAME}_unit PRIVATE cxx_std_23)
-target_link_libraries(${PROJECT_NAME}_unit PUBLIC gtest_main pthread ${CMAKE_DL_LIBS} ${ADDITIONAL_LIBRARIES})
+target_link_libraries(${PROJECT_NAME}_unit PUBLIC gtest_main pthread OpenSSL::Crypto ${CMAKE_DL_LIBS} ${ADDITIONAL_LIBRARIES})
 gtest_discover_tests(${PROJECT_NAME}_unit)
