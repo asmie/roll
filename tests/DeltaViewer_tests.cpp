@@ -158,3 +158,29 @@ TEST(DeltaViewer, rejects_unknown_version)
 	std::remove(NEW.c_str());
 	std::remove(DELTA.c_str());
 }
+
+// The viewer allocates a buffer for the ADDED payload from the declared
+// chunk_size, so it needs the same bound as Apply — before this check, a
+// hostile size field aborted the process with std::bad_alloc.
+TEST(DeltaViewer, rejects_oversized_chunk_size)
+{
+	const std::string DELTA = viewer_path("oversized_chunk");
+
+	std::vector<uint8_t> raw(std::begin(DELTA_MAGIC), std::end(DELTA_MAGIC));
+	for (int shift = 24; shift >= 0; shift -= 8)
+		raw.push_back(static_cast<uint8_t>((DELTA_FORMAT_VERSION >> shift) & 0xFF));
+	const auto push_u64_be = [&raw](uint64_t value) {
+		for (int shift = 56; shift >= 0; shift -= 8)
+			raw.push_back(static_cast<uint8_t>((value >> shift) & 0xFF));
+	};
+	push_u64_be(static_cast<uint64_t>(EntryType::ADDED_CHUNK));
+	push_u64_be(0xDEADBEEFu);                             // signature
+	raw.insert(raw.end(), BLAKE2b().get_hash_size(), 0);  // hash
+	push_u64_be(uint64_t{1} << 62);                       // 4 EiB chunk_size
+	write_bytes(DELTA, raw);
+
+	SilenceCout s;
+	EXPECT_NE(view_delta(DELTA), 0);
+
+	std::remove(DELTA.c_str());
+}

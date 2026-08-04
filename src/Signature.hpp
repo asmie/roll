@@ -1,6 +1,7 @@
 #ifndef SIGNATURE_HPP
 #define SIGNATURE_HPP
 
+#include "DeltaFormat.hpp"
 #include "IHash.hpp"
 #include "IRollingHash.hpp"
 #include "FileIO.hpp"
@@ -38,9 +39,11 @@ struct SignedChunk {
 */
 template <RollingHashAlgorithm T, StrongHashAlgorithm U>
 class Signature {
-	static constexpr size_t MIN_CHUNK_SIZE = 512;     // Minimum chunk size in bytes
-	static constexpr size_t MAX_CHUNK_SIZE = 16384;   // Maximum chunk size in bytes (16KB)
-	static constexpr size_t TARGET_CHUNK_SIZE = 8192;  // Target average chunk size
+	// Sourced from DeltaFormat.hpp: the delta format bounds what a chunk may
+	// be, and the chunker honors that bound rather than defining its own.
+	static constexpr size_t MIN_CHUNK_SIZE = DELTA_MIN_CHUNK_SIZE;
+	static constexpr size_t MAX_CHUNK_SIZE = DELTA_MAX_CHUNK_SIZE;
+	static constexpr size_t TARGET_CHUNK_SIZE = DELTA_TARGET_CHUNK_SIZE;
 
 public:
 	/**

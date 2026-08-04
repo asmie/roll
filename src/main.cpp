@@ -1,3 +1,4 @@
+#include <exception>
 #include <iostream>
 #include <string_view>
 
@@ -67,9 +68,7 @@ int run_apply(const char* old_path, const char* delta_path, const char* out_path
 	return 0;
 }
 
-} // namespace
-
-int main(int argc, const char** argv)
+int run(int argc, const char** argv)
 {
 	if (argc < 2) {
 		print_usage(argv[0]);
@@ -106,4 +105,23 @@ int main(int argc, const char** argv)
 	std::cerr << "Unknown command: " << command << std::endl;
 	print_usage(argv[0]);
 	return 1;
+}
+
+} // namespace
+
+int main(int argc, const char** argv)
+{
+	// The hash backend and the fingerprint constructor both report failure by
+	// throwing, and a corrupt length field can still surface as bad_alloc.
+	// Catch here so those exit with a diagnostic instead of a SIGABRT from
+	// std::terminate.
+	try {
+		return run(argc, argv);
+	} catch (const std::exception& e) {
+		std::cerr << "Fatal error: " << e.what() << std::endl;
+		return 2;
+	} catch (...) {
+		std::cerr << "Fatal error: unknown exception" << std::endl;
+		return 2;
+	}
 }

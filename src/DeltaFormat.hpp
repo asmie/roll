@@ -15,6 +15,17 @@ inline constexpr size_t DELTA_HEADER_SIZE = 8;
 // hash of the reconstructed new file.
 inline constexpr uint8_t DELTA_TRAILER_TAG = 0xFF;
 
+// Chunk-size bounds. These are format invariants, not merely chunker tuning:
+// no entry may legitimately declare a chunk larger than DELTA_MAX_CHUNK_SIZE,
+// so readers must reject anything bigger *before* allocating a buffer for it.
+// Skipping that check turns a corrupt or hostile size field into a
+// multi-exabyte allocation and an uncaught std::bad_alloc. There is no
+// enforceable lower bound: the residual chunk at EOF, and any file shorter
+// than one rolling window, are legitimately smaller than the minimum.
+inline constexpr size_t DELTA_MIN_CHUNK_SIZE = 512;
+inline constexpr size_t DELTA_TARGET_CHUNK_SIZE = 8192;
+inline constexpr size_t DELTA_MAX_CHUNK_SIZE = 16384;
+
 // Per-entry type tag. Serialized as 8 bytes big-endian in the delta stream.
 enum class EntryType : uint8_t {
     ORIGINAL_CHUNK = 0,

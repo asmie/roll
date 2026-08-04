@@ -9,7 +9,6 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -237,6 +236,13 @@ int view_delta(const std::filesystem::path& delta_file) {
 			return 1;
 		}
 
+		// Reject an out-of-range size before the ADDED payload allocation below.
+		if (chunkSize > DELTA_MAX_CHUNK_SIZE) {
+			std::cerr << "Error: Chunk #" << (chunkNum + 1) << " declares an "
+			          << "out-of-range chunk size " << chunkSize << std::endl;
+			return 1;
+		}
+
 		std::cout << "Chunk #" << ++chunkNum << ":" << std::endl;
 		std::cout << "  Type: " << entryTypeToString(static_cast<EntryType>(entryType))
 		          << " (" << entryType << ")" << std::endl;
@@ -250,11 +256,6 @@ int view_delta(const std::filesystem::path& delta_file) {
 		std::cout << std::dec << std::endl;
 
 		if (entryType == static_cast<uint64_t>(EntryType::ADDED_CHUNK)) {
-			if (chunkSize > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
-				std::cerr << "Error: ADDED payload is too large to inspect" << std::endl;
-				return 1;
-			}
-
 			std::vector<uint8_t> rawData(static_cast<size_t>(chunkSize));
 			if (!rawData.empty() &&
 			    !readExact(file, rawData.data(), static_cast<std::streamsize>(rawData.size()))) {

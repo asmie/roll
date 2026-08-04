@@ -52,8 +52,17 @@ public:
 	                   const std::filesystem::path& output_file_path)
 	{
 		bool output_opened = false;
-		Result result = apply_delta_impl(old_file_path, delta_file_path, output_file_path,
-		                                 output_opened);
+		Result result{false, "", 0, 0};
+		// Convert escaping exceptions into a failed Result so the stub cleanup
+		// below still runs. Without this, an exception (a hash-backend error, a
+		// bad_alloc) unwinds past the cleanup and leaves a partial output file
+		// that looks like a successful reconstruction.
+		try {
+			result = apply_delta_impl(old_file_path, delta_file_path, output_file_path,
+			                         output_opened);
+		} catch (const std::exception& e) {
+			result = Result{false, std::string("Unexpected error: ") + e.what(), 0, 0};
+		}
 		// Don't leave a half-written stub on disk: if we opened the output and
 		// the run failed, remove the file. Alias checks run before open, so we
 		// will never delete the user's old/delta here.
@@ -167,6 +176,14 @@ private:
 			uint64_t chunk_size;
 			if (!readU64BE(delta, chunk_size)) {
 				result.error_message = "Truncated delta: missing chunk_size";
+				return result;
+			}
+
+			// Bound the declared size before it reaches any allocation
+			// (the ADDED payload read and applyDiff's output reserve).
+			if (chunk_size > DELTA_MAX_CHUNK_SIZE) {
+				result.error_message = "Delta entry declares an out-of-range chunk size: " +
+				                       std::to_string(chunk_size);
 				return result;
 			}
 

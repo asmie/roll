@@ -117,8 +117,18 @@ public:
 	bool is_eof() const {
 		return f_.eof();
 	}
+
+	/**
+	* Size of the file as measured when open() succeeded, in bytes. Zero if the
+	* file is not open or its size could not be queried. Not updated by writes,
+	* so this is only meaningful for files opened for reading.
+	*/
+	size_t size() const noexcept {
+		return size_;
+	}
 private:
 	std::fstream f_;
+	size_t size_ { 0 };
 };
 
 #endif

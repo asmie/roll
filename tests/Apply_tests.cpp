@@ -77,6 +77,29 @@ void cleanup(std::initializer_list<std::string> paths)
 		std::remove(p.c_str());
 }
 
+// Append `value` as a big-endian u64, matching the entry header encoding in
+// src/Delta.hpp.
+void push_u64_be(std::vector<uint8_t>& out, uint64_t value)
+{
+	for (int shift = 56; shift >= 0; shift -= 8)
+		out.push_back(static_cast<uint8_t>((value >> shift) & 0xFF));
+}
+
+// Hand-build a valid-looking single-entry delta whose chunk_size field is
+// `declared_size`. Used to check that readers bound the declared size *before*
+// allocating a buffer for it.
+std::vector<uint8_t> crafted_delta(EntryType type, uint64_t declared_size)
+{
+	std::vector<uint8_t> raw(std::begin(DELTA_MAGIC), std::end(DELTA_MAGIC));
+	for (int shift = 24; shift >= 0; shift -= 8)
+		raw.push_back(static_cast<uint8_t>((DELTA_FORMAT_VERSION >> shift) & 0xFF));
+	push_u64_be(raw, static_cast<uint64_t>(type));
+	push_u64_be(raw, 0xDEADBEEFu);                       // signature
+	raw.insert(raw.end(), BLAKE2b().get_hash_size(), 0);  // hash
+	push_u64_be(raw, declared_size);
+	return raw;
+}
+
 bool roundtrip(const std::string& old_path, const std::string& new_path,
                const std::string& delta_path, const std::string& out_path,
                std::string* err = nullptr)
@@ -740,4 +763,76 @@ TEST(Apply, rejects_corrupted_whole_file_trailer)
 	EXPECT_FALSE(ar.success);
 
 	cleanup({OLD, NEW, DELTA, OUT});
+}
+
+// A declared chunk_size is attacker-controlled: before it was bounded, a huge
+// value reached `std::vector<uint8_t> vec(chunk_size)` and aborted the process
+// with an uncaught std::bad_alloc, which also skipped the output-stub cleanup.
+TEST(Apply, rejects_oversized_added_chunk_size)
+{
+	const std::string OLD = tpath("apply_t_oversize_added_old");
+	const std::string DELTA = tpath("apply_t_oversize_added_delta");
+	const std::string OUT = tpath("apply_t_oversize_added_out");
+
+	write_random(OLD, 1024, 0xB1u);
+	write_bytes(DELTA, crafted_delta(EntryType::ADDED_CHUNK, uint64_t{1} << 62));
+
+	Apply<RKFinger, BLAKE2b> apply;
+	auto ar = apply.apply_delta(OLD, DELTA, OUT);
+	EXPECT_FALSE(ar.success);
+	EXPECT_NE(ar.error_message.find("out-of-range chunk size"), std::string::npos)
+		<< "actual: " << ar.error_message;
+	EXPECT_FALSE(std::filesystem::exists(OUT))
+		<< "output stub was left on disk after a rejected delta";
+
+	cleanup({OLD, DELTA, OUT});
+}
+
+TEST(Apply, rejects_oversized_modified_chunk_size)
+{
+	const std::string OLD = tpath("apply_t_oversize_mod_old");
+	const std::string DELTA = tpath("apply_t_oversize_mod_delta");
+	const std::string OUT = tpath("apply_t_oversize_mod_out");
+
+	write_random(OLD, 1024, 0xB2u);
+	// MODIFIED reaches the bound via applyDiff's output.reserve(target_size).
+	write_bytes(DELTA, crafted_delta(EntryType::MODIFIED_CHUNK, ~uint64_t{0}));
+
+	Apply<RKFinger, BLAKE2b> apply;
+	auto ar = apply.apply_delta(OLD, DELTA, OUT);
+	EXPECT_FALSE(ar.success);
+	EXPECT_NE(ar.error_message.find("out-of-range chunk size"), std::string::npos)
+		<< "actual: " << ar.error_message;
+	EXPECT_FALSE(std::filesystem::exists(OUT));
+
+	cleanup({OLD, DELTA, OUT});
+}
+
+// Pin the boundary: one byte over the format maximum is rejected by the size
+// check, while the maximum itself falls through to the normal (truncated
+// payload) failure path rather than being refused for its size.
+TEST(Apply, chunk_size_bound_is_exact)
+{
+	const std::string OLD = tpath("apply_t_bound_old");
+	const std::string DELTA = tpath("apply_t_bound_delta");
+	const std::string OUT = tpath("apply_t_bound_out");
+
+	write_random(OLD, 1024, 0xB3u);
+
+	write_bytes(DELTA, crafted_delta(EntryType::ADDED_CHUNK, DELTA_MAX_CHUNK_SIZE + 1));
+	Apply<RKFinger, BLAKE2b> over;
+	auto over_result = over.apply_delta(OLD, DELTA, OUT);
+	EXPECT_FALSE(over_result.success);
+	EXPECT_NE(over_result.error_message.find("out-of-range chunk size"), std::string::npos)
+		<< "actual: " << over_result.error_message;
+
+	write_bytes(DELTA, crafted_delta(EntryType::ADDED_CHUNK, DELTA_MAX_CHUNK_SIZE));
+	Apply<RKFinger, BLAKE2b> at_max;
+	auto at_max_result = at_max.apply_delta(OLD, DELTA, OUT);
+	EXPECT_FALSE(at_max_result.success);
+	EXPECT_EQ(at_max_result.error_message.find("out-of-range chunk size"), std::string::npos)
+		<< "the maximum legal chunk size must not be rejected for its size: "
+		<< at_max_result.error_message;
+
+	cleanup({OLD, DELTA, OUT});
 }

@@ -2,6 +2,7 @@
 
 #include <bit>
 #include <fstream>
+#include <system_error>
 
 FileIO::~FileIO()
 {
@@ -26,7 +27,19 @@ bool FileIO::open(const std::filesystem::path& file_path, FileMode mode)
 	f_.clear();
 	f_.open(file_path, fmode);
 
-	return f_.good();
+	if (!f_.good()) {
+		size_ = 0;
+		return false;
+	}
+
+	// Record the size up front so read_chunk() can clamp requested lengths
+	// without seeking. Queried via <filesystem> rather than seekg/tellg so the
+	// stream position stays where the caller expects it.
+	std::error_code ec;
+	const auto sz = std::filesystem::file_size(file_path, ec);
+	size_ = ec ? 0 : static_cast<size_t>(sz);
+
+	return true;
 }
 
 bool FileIO::close()
@@ -59,9 +72,26 @@ std::vector<uint8_t> FileIO::read_chunk(size_t chunk_size)
 	if (!f_.is_open() || chunk_size == 0)
 		return {};
 
+	// Never pre-allocate more than the file could possibly supply. The contract
+	// is "read up to chunk_size bytes", so this returns the same bytes — but it
+	// stops a corrupt or hostile length field from becoming a huge allocation
+	// and an uncaught std::bad_alloc.
+	const size_t requested = chunk_size;
+	if (size_ != 0 && chunk_size > size_)
+		chunk_size = size_;
+
 	std::vector<uint8_t> vec(chunk_size);
 	f_.read(reinterpret_cast<char*>(vec.data()), chunk_size);
 	vec.resize(static_cast<size_t>(f_.gcount()));  // trim to actually read
+
+	// Clamping must not hide end-of-file from callers. std::istream::read sets
+	// eofbit *and* failbit when it cannot supply the full request, and code
+	// here relies on that (is_eof(), and truncated-delta detection). Clamping
+	// can make the shortened read succeed exactly, so restore the flags that
+	// the unclamped request would have raised.
+	if (vec.size() < requested)
+		f_.setstate(std::ios::eofbit | std::ios::failbit);
+
 	return vec;
 }
 
