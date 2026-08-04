@@ -302,9 +302,13 @@ private:
         const int offset = d_max;
         const int v_size = 2 * d_max + 1;
 
-        std::vector<int> v(v_size, 0);
-        std::vector<std::vector<int>> trace;
-        trace.reserve(static_cast<size_t>(d_max) + 1);
+        // Scratch buffers are members reused across chunks (see the note on
+        // their declarations): assign/clear keep the existing capacity, so
+        // after the first few chunks these loops stop allocating entirely.
+        std::vector<int>& v = myers_v_;
+        std::vector<int>& trace = myers_trace_;
+        v.assign(static_cast<size_t>(v_size), 0);
+        trace.clear();
 
         int final_d = -1;
         for (int d = 0; d <= d_max && final_d < 0; d++) {
@@ -320,7 +324,7 @@ private:
                     break;
                 }
             }
-            trace.push_back(v);
+            trace.insert(trace.end(), v.begin() + (offset - d), v.begin() + (offset + d + 1));
         }
 
         if (final_d < 0)
@@ -331,12 +335,14 @@ private:
         out_ses.reserve(static_cast<size_t>(N + M));
         int x = N, y = M;
         for (int d = final_d; d > 0; d--) {
-            const auto& vp = trace[d - 1];
+            // Level d-1 spans [(d-1)^2, d^2); diagonal k sits at base + k.
+            const size_t base = static_cast<size_t>(d - 1) * static_cast<size_t>(d - 1) +
+                                static_cast<size_t>(d - 1);
             const int k = x - y;
             const bool came_from_above = (k == -d) ||
-                (k != d && vp[offset + k - 1] < vp[offset + k + 1]);
+                (k != d && trace[base + k - 1] < trace[base + k + 1]);
             const int prev_k = came_from_above ? k + 1 : k - 1;
-            const int prev_x = vp[offset + prev_k];
+            const int prev_x = trace[base + prev_k];
             const int prev_y = prev_x - prev_k;
 
             // Unwind the diagonal snake before the edit step.
@@ -467,6 +473,29 @@ private:
         }
         return diff;
     }
+
+    // Scratch buffers for myersSES, reused across chunks.
+    //
+    // `myers_trace_` holds the per-level snapshots backtracking needs, flattened
+    // into one buffer: only diagonals k in [-d, d] are read back from level d,
+    // and those 2d+1 widths sum to exactly d*d, so level d occupies
+    // [d*d, (d+1)*(d+1)) and diagonal k sits at (d*d + d) + k with no offset
+    // bookkeeping.
+    //
+    // Both the trimming and the reuse are load-bearing for speed. Sizing
+    // snapshots from d_limit rather than the distance actually reached made
+    // every modified chunk pay the worst case: at d_limit=2048 each level
+    // copied ~16 KB, so a chunk needing a handful of edits still generated
+    // megabytes of allocation traffic. Re-growing the buffer per chunk is just
+    // as costly the other way, because a buffer this size is served by mmap and
+    // every growth step faults in fresh pages. Holding the high-water-mark
+    // capacity across chunks avoids both.
+    //
+    // These make myersSES stateful: one Delta instance cannot generate two
+    // deltas concurrently. generate_delta is a single sequential pass, so that
+    // costs nothing today — but parallelising it means one Delta per worker.
+    std::vector<int> myers_v_;
+    std::vector<int> myers_trace_;
 
     /**
     * Helper to push 32-bit value as 4 bytes
