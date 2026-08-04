@@ -5,6 +5,7 @@
 #include <vector>
 #include "gtest/gtest.h"
 
+#include "DeltaFormat.hpp"
 #include "RK_finger.hpp"
 #include "blake2b.h"
 #include "Signature.hpp"
@@ -27,11 +28,34 @@ TEST(Signature, generate_signature_incorrect)
 	ASSERT_EQ(chunks.size(), 0);
 }
 
+namespace {
+
+void write_tmp(const std::filesystem::path& p, const std::vector<uint8_t>& bytes)
+{
+	std::ofstream f(p, std::ios::binary);
+	if (!bytes.empty())
+		f.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+}
+
+} // namespace
+
 TEST(Signature, generate_signature)
 {
+	// Generate the 512 KiB input under temp_directory_path() from a fixed seed
+	// rather than reading a repo-relative fixture: "../tests/testfile" only
+	// resolves when the build directory happens to sit directly inside the
+	// repository root, so the test failed in any other build location
+	// (sanitizer builds, IDE build dirs, packaging trees).
+	const auto path = std::filesystem::temp_directory_path() / "sig_generate_signature";
+	std::mt19937 rng(0x5EEDu);
+	std::vector<uint8_t> data(512 * 1024);
+	for (auto& b : data)
+		b = static_cast<uint8_t>(rng());
+	write_tmp(path, data);
+
 	Signature<RKFinger, BLAKE2b> signatures;
 
-	signatures.generate_signatures("../tests/testfile");
+	ASSERT_TRUE(signatures.generate_signatures(path));
 
 	auto chunks = signatures.get_chunks();
 
@@ -49,18 +73,20 @@ TEST(Signature, generate_signature)
 	for (size_t i = 1; i < chunks.size(); ++i) {
 		ASSERT_EQ(chunks[i].start_offset, chunks[i-1].start_offset + chunks[i-1].chunk_size);
 	}
+
+	// Every chunk must respect the format bounds, except the residual at EOF
+	// which is legitimately allowed to be shorter than the minimum.
+	for (size_t i = 0; i < chunks.size(); ++i) {
+		EXPECT_LE(chunks[i].chunk_size, DELTA_MAX_CHUNK_SIZE) << "chunk " << i;
+		if (i + 1 < chunks.size()) {
+			EXPECT_GE(chunks[i].chunk_size, DELTA_MIN_CHUNK_SIZE) << "chunk " << i;
+		}
+	}
+	EXPECT_EQ(chunks.back().start_offset + chunks.back().chunk_size, data.size())
+		<< "chunks must cover the whole input";
+
+	std::filesystem::remove(path);
 }
-
-namespace {
-
-void write_tmp(const std::filesystem::path& p, const std::vector<uint8_t>& bytes)
-{
-	std::ofstream f(p, std::ios::binary);
-	if (!bytes.empty())
-		f.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-}
-
-} // namespace
 
 TEST(Signature, small_file_under_window)
 {
