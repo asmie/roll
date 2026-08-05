@@ -7,8 +7,8 @@
 
 `rolling_hash` is a C++23 command-line tool for generating, applying, and
 inspecting binary deltas between two files. It uses content-defined chunking
-with Rabin-Karp rolling fingerprints for chunk boundaries and BLAKE-512 hashes
-for strong chunk identity checks.
+with Rabin-Karp rolling fingerprints for chunk boundaries and BLAKE2b-512
+(RFC 7693, via OpenSSL) for strong chunk identity checks.
 
 The single `rolling_hash` binary exposes three subcommands:
 
@@ -25,17 +25,25 @@ hashing, file I/O, signatures, delta application, and rolling fingerprints.
   chunk to change.
 - Adaptive chunk boundaries with a 512 byte minimum, 16 KiB maximum, and an
   8 KiB target average chunk size.
-- Dual chunk identity checks using a rolling fingerprint plus BLAKE-512.
+- Dual chunk identity checks using a rolling fingerprint plus BLAKE2b-512.
 - Delta entries for original, added, modified, and removed chunks.
-- Delta application with payload hash verification and truncation/aliasing
-  checks.
+- Repeated content is reused rather than re-sent, so a reordered or duplicated
+  block costs one reference instead of a full copy.
+- A byte-level diff is emitted only when it is actually smaller than storing the
+  chunk outright, which bounds a delta at roughly the size of its input.
+- Delta application verifies each generated payload against its chunk hash and
+  the whole reconstructed file against a trailer hash, and refuses an output path
+  that aliases either input.
 
 ## Requirements
 
-- CMake 3.16 or newer.
-- A C++23 compiler such as recent GCC, Clang, or MSVC.
-- Network access during first configure if GoogleTest is not already available,
-  because CMake fetches GoogleTest v1.14.0 for the test target.
+- CMake 3.16 or newer (3.19+ to use the configure presets).
+- A C++23 compiler and standard library — see *Compiler requirements* below, as
+  one plausible-looking combination does not work.
+- OpenSSL 1.1.0 or newer, for BLAKE2b-512 via the EVP digest interface. This is
+  a hard dependency: configure fails without it.
+- Network access during first configure, because CMake fetches GoogleTest v1.14.0
+  for the test target. Configure with `-DBUILD_TESTING=OFF` to skip both.
 
 ## Build
 
@@ -111,9 +119,12 @@ Inspect a delta:
 ./rolling_hash view changes.delta
 ```
 
-The delta file is a binary stream of chunk records. Each record stores an entry
-type, rolling signature, BLAKE-512 hash, chunk size, and optional payload data for
-added or modified chunks.
+The delta file is a versioned binary stream. It opens with a 4-byte magic and a
+big-endian format version, followed by chunk records, and closes with a trailer
+holding a hash of the whole reconstructed file. Each record stores an entry type,
+rolling signature, BLAKE2b-512 hash, chunk size, and — for added or modified
+chunks — payload data. `src/DeltaCodec.hpp` is the single definition of the
+layout; `rolling_hash view` prints it.
 
 ## Example
 
@@ -136,19 +147,36 @@ If `cmp` exits successfully, the reconstructed file matches the new file.
 ## How It Works
 
 1. `Signature` reads each input file and splits it into variable-sized chunks.
-2. Every chunk receives a Rabin-Karp rolling fingerprint and a BLAKE-512 hash.
+2. Every chunk receives a Rabin-Karp rolling fingerprint and a BLAKE2b-512 hash.
 3. `Delta` compares the old and new signatures, emitting records for reused,
-   added, modified, and removed chunks.
-4. Modified chunks store compact byte-level diff opcodes:
+   added, modified, and removed chunks. A chunk whose content exists anywhere in
+   the old file becomes a reference rather than a copy, even if it appears
+   several times.
+4. Modified chunks store compact byte-level diff opcodes, computed with Myers'
+   O(ND) algorithm (falling back to a greedy diff when the edit distance is
+   large):
    - `D`: replace bytes at a position.
    - `I`: insert bytes at a position.
    - `X`: delete bytes at a position.
-5. `Apply` reads the old file and delta records in target-file order, verifies
-   hashes for generated payloads, and writes the reconstructed output.
 
-The delta format is big-endian for all multi-byte integer fields. Treat
-generated deltas as an internal format for matching builds unless
-compatibility is explicitly versioned.
+   The diff is kept only if it costs less than storing the chunk literally;
+   otherwise the chunk is emitted whole.
+5. `Apply` reads the old file and delta records in target-file order, verifies
+   each generated payload against its recorded hash, and writes the
+   reconstructed output. A trailing whole-file hash is checked at the end, so
+   truncation or reordering is caught even when every individual chunk verifies.
+
+All multi-byte integer fields are big-endian. The stream carries a format
+version and readers reject anything they do not recognise, but the format is
+still an internal one: it is not a compatibility promise across versions.
+
+## Exit status
+
+| Status | Meaning |
+| --- | --- |
+| `0` | Success |
+| `1` | Bad input: malformed or truncated delta, hash mismatch, or an output path that aliases an input |
+| `2` | Environment failure: a file could not be opened, read, or written |
 
 ## Tests
 
@@ -162,12 +190,20 @@ ctest --output-on-failure
 
 The current test suite covers:
 
-- File opening, reading, writing, EOF behavior, and invalid paths.
-- BLAKE-512 hashing.
-- Signature generation.
-- Rabin-Karp rolling fingerprint behavior.
-- Delta application for identical files, empty inputs, append/truncate cases,
-  in-chunk modifications, malformed deltas, and output alias protection.
+- File I/O: opening, reading, writing, buffered byte-wise reads interleaved with
+  bulk reads, EOF behaviour, close semantics, and invalid paths.
+- BLAKE2b-512 against the RFC 7693 vectors, streaming versus one-shot.
+- Rabin-Karp fingerprints checked against a naive reference at every position,
+  for both the Mersenne fast path and the general modulus.
+- Signature generation, including sub-window files and resynchronisation after
+  an insertion.
+- The delta codec: big-endian round trips, header and version rejection, and
+  truncation in the entry header, opcodes, and trailer.
+- The chunk index, including reuse of repeated content.
+- Concept conformance, including implementations that inherit from nothing.
+- Delta application for identical files, empty inputs, append and truncate
+  cases, in-chunk modifications, malformed and hostile deltas, out-of-range
+  chunk sizes, failure categories, and output alias protection.
 
 ## Project Layout
 
@@ -175,23 +211,39 @@ The current test suite covers:
 src/
   main.cpp          rolling_hash CLI entry point and subcommand dispatcher
   Apply.hpp         delta application logic
-  Delta.hpp         delta generation and binary record writing
+  Delta.hpp         delta generation, Myers diff, entry selection
   Signature.hpp     content-defined chunk signature generation
   RK_finger.hpp     Rabin-Karp rolling fingerprint implementation
+  ChunkIndex.hpp    content index shared by Delta and Apply
+  DeltaCodec.hpp    the delta wire format: reader, writer, and layout
+  DeltaFormat.hpp   format constants, entry types, and chunk-size bounds
+  DeltaError.hpp    failure categories and success statistics
+  HashConcepts.hpp  requirements on the rolling and strong hash algorithms
   DeltaViewer.*     delta inspection command implementation
-  FileIO.*          file I/O helper
-  blake.*           BLAKE-512 implementation
+  FileIO.*          buffered file I/O helper
+  blake2b.*         BLAKE2b-512 via OpenSSL EVP
+  rh_config.h.in    configure-time toolchain probes
 tests/
   *_tests.cpp       GoogleTest unit tests
 CMakeLists.txt      build and test configuration
+CMakePresets.json   release / debug / asan / no-tests presets
 ```
 
 ## Development
 
 Keep changes warning-clean under the CMake options in `CMakeLists.txt`
-(`-Wall -Wextra` for non-MSVC builds, `/W4` for MSVC). Add focused tests under
-`tests/` when changing file I/O, chunking, hashing, delta generation, or delta
-application behavior.
+(`-Wall -Wextra` for non-MSVC builds, `/W4` for MSVC); CI treats warnings as
+build failures. Add focused tests under `tests/` when changing file I/O,
+chunking, hashing, delta generation, or delta application behaviour.
+
+Before proposing a change that touches the delta format or the diff algorithm,
+check the effect on both correctness and size: a create/apply round trip must
+reproduce the new file byte for byte, and a refactor that is not meant to change
+output should produce byte-identical deltas. Run the sanitised build too:
+
+```bash
+cmake --preset asan && cmake --build build/asan -j$(nproc) && ctest --preset asan
+```
 
 ## License
 
