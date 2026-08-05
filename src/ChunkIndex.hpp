@@ -10,8 +10,7 @@
 #include <vector>
 
 /**
-* Content-addressed index over a signature's chunks, mapping chunk content to
-* the position it occupies.
+* Hash for content-addressed chunk lookup.
 *
 * Delta and Apply both need this, and both carried their own verbatim copy of
 * the hash and equality functors. The copies drifted: `h1 ^ (h2 << 1)` was
@@ -42,66 +41,73 @@ struct ChunkEqual {
 	}
 };
 
-template <class T>
-using ChunkMap = std::unordered_map<SignedChunk<T>, size_t, ChunkHash<T>, ChunkEqual<T>>;
-
 /**
-* Index `chunks` by content. When the same content occurs more than once, the
-* map retains the last occurrence; callers that must consume each occurrence
-* separately should pair this with find_unused_match().
+* Content-addressed index over a signature's chunks, answering "give me a
+* not-yet-consumed chunk with this content" in O(1) amortized.
+*
+* Each distinct content maps to every position it occupies plus a consumption
+* cursor. The predecessor design mapped content to a single position and fell
+* back to a linear scan over all chunks whenever that position was already
+* consumed. On repetitive input — zero padding, VM images — where thousands of
+* chunks share one content, the scan ran per lookup and the whole delta
+* generation went quadratic: 40 MB of zeros appended to 40 MB of zeros took
+* 6.2s to create and 3.2s to apply, roughly quadrupling with each doubling of
+* input.
+*
+* The cursor is safe because consumption is monotone: callers only ever flip
+* `used` flags from false to true (some through this index, some through the
+* same-position fast path that bypasses it). An entry the cursor has skipped as
+* consumed can therefore never become live again, and each bucket entry is
+* passed at most once across the index's lifetime.
 */
 template <class T>
-[[nodiscard]] ChunkMap<T> build_chunk_map(const std::vector<SignedChunk<T>>& chunks) {
-	ChunkMap<T> map;
-	map.reserve(chunks.size());
-	for (size_t i = 0; i < chunks.size(); ++i)
-		map[chunks[i]] = i;
-	return map;
-}
+class ChunkIndex {
+public:
+	/// Index every position of `chunks` by content. Positions within a bucket
+	/// are ascending, so matches are consumed in file order.
+	explicit ChunkIndex(const std::vector<SignedChunk<T>>& chunks) {
+		buckets_.reserve(chunks.size());
+		for (size_t i = 0; i < chunks.size(); ++i)
+			buckets_[chunks[i]].positions.push_back(i);
+	}
 
-/**
-* Locate a not-yet-consumed chunk equal to `probe`.
-*
-* Prefers the position the map records. Falls back to a linear scan when that
-* position is already consumed, which is exactly the duplicate-content case the
-* map cannot represent on its own.
-*
-* @param[in] chunks chunk list the index was built over
-* @param[in] used per-chunk consumed flags, parallel to `chunks`
-* @param[in] map index produced by build_chunk_map()
-* @param[in] probe content to look for
-* @param[out] out_index position of the match, set only on success
-* @return True if an unused match was found.
-*/
-template <class T>
-[[nodiscard]] bool find_unused_match(const std::vector<SignedChunk<T>>& chunks,
-                       const std::vector<bool>& used,
-                       const ChunkMap<T>& map,
-                       const SignedChunk<T>& probe,
-                       size_t& out_index) {
-	auto it = map.find(probe);
+	/**
+	* Locate a not-yet-consumed chunk equal to `probe`.
+	*
+	* @param[in] used per-chunk consumed flags, parallel to the indexed list.
+	*            Flags must only ever transition from false to true.
+	* @param[in] probe content to look for
+	* @param[out] out_index position of the match, set only on success
+	* @return True if an unused match was found. The caller is expected to mark
+	*         the returned position used; until it does, subsequent calls return
+	*         the same position.
+	*/
+	[[nodiscard]] bool find_unused(const std::vector<bool>& used,
+	                               const SignedChunk<T>& probe,
+	                               size_t& out_index) {
+		auto it = buckets_.find(probe);
+		if (it == buckets_.end())
+			return false;
 
-	// A miss means no chunk has this content at all, so the scan below could not
-	// succeed either. Returning here keeps a lookup that finds nothing at O(1):
-	// scanning on every miss would make a caller that probes each of n chunks
-	// against a non-matching index cost O(n^2).
-	if (it == map.end())
-		return false;
+		Bucket& bucket = it->second;
+		while (bucket.cursor < bucket.positions.size() &&
+		       used[bucket.positions[bucket.cursor]])
+			++bucket.cursor;
 
-	if (!used[it->second]) {
-		out_index = it->second;
+		if (bucket.cursor == bucket.positions.size())
+			return false;
+
+		out_index = bucket.positions[bucket.cursor];
 		return true;
 	}
 
-	// The indexed position is taken. The map holds one position per distinct
-	// content, so another copy may still be free — scan for it.
-	for (size_t i = 0; i < chunks.size(); ++i) {
-		if (!used[i] && chunks[i] == probe) {
-			out_index = i;
-			return true;
-		}
-	}
-	return false;
-}
+private:
+	struct Bucket {
+		std::vector<size_t> positions;  // ascending, by construction
+		size_t cursor { 0 };            // positions before this are consumed
+	};
+
+	std::unordered_map<SignedChunk<T>, Bucket, ChunkHash<T>, ChunkEqual<T>> buckets_;
+};
 
 #endif // CHUNKINDEX_HPP

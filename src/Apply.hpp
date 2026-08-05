@@ -124,7 +124,7 @@ private:
 			                                 "Failed to read old file: " + old_file_path.string()});
 		const auto& old_chunks = old_sig.get_chunks();
 
-		auto chunk_map = build_chunk_map(old_chunks);
+		ChunkIndex<typename T::RollingHashType> chunk_index(old_chunks);
 		std::vector<bool> original_used(old_chunks.size(), false);
 
 		U hash_func;
@@ -178,7 +178,7 @@ private:
 					probe.start_offset = 0;
 
 					size_t k;
-					if (!find_unused_match(old_chunks, original_used, chunk_map, probe, k)) {
+					if (!chunk_index.find_unused(original_used, probe, k)) {
 						return std::unexpected(DeltaError{DeltaErrc::corrupt_delta,
 						                                    "ORIGINAL entry references unknown chunk"});
 					}
@@ -263,7 +263,7 @@ private:
 					probe.start_offset = 0;
 
 					size_t k;
-					if (!find_unused_match(old_chunks, original_used, chunk_map, probe, k)) {
+					if (!chunk_index.find_unused(original_used, probe, k)) {
 						return std::unexpected(DeltaError{DeltaErrc::corrupt_delta,
 						                                    "REMOVED entry references unknown or already-consumed old chunk"});
 					}
@@ -294,8 +294,6 @@ private:
 
 		return stats;
 	}
-
-	using ChunkMap = ::ChunkMap<typename T::RollingHashType>;
 
 	bool verifyHash(U& hash_func, size_t hash_size,
 	                std::span<const uint8_t> chunk_data,

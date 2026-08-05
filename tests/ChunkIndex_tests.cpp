@@ -9,6 +9,7 @@
 namespace {
 
 using Chunk = SignedChunk<uint64_t>;
+using Index = ChunkIndex<uint64_t>;
 
 Chunk make_chunk(uint64_t signature, uint8_t hash_seed, size_t size, size_t offset)
 {
@@ -29,12 +30,12 @@ TEST(ChunkIndex, finds_chunk_by_content)
 		make_chunk(22, 0xB2, 512, 512),
 		make_chunk(33, 0xC3, 512, 1024),
 	};
-	const auto map = build_chunk_map(chunks);
+	Index index(chunks);
 	std::vector<bool> used(chunks.size(), false);
 
-	size_t index = 999;
-	ASSERT_TRUE(find_unused_match(chunks, used, map, chunks[1], index));
-	EXPECT_EQ(index, 1u);
+	size_t position = 999;
+	ASSERT_TRUE(index.find_unused(used, chunks[1], position));
+	EXPECT_EQ(position, 1u);
 }
 
 // SignedChunk::operator== ignores start_offset, so identical content at a
@@ -42,75 +43,143 @@ TEST(ChunkIndex, finds_chunk_by_content)
 TEST(ChunkIndex, matches_identical_content_at_a_different_offset)
 {
 	std::vector<Chunk> chunks{ make_chunk(11, 0xA1, 512, 0) };
-	const auto map = build_chunk_map(chunks);
+	Index index(chunks);
 	std::vector<bool> used(chunks.size(), false);
 
 	const auto probe = make_chunk(11, 0xA1, 512, 4096);  // same content, elsewhere
-	size_t index = 999;
-	ASSERT_TRUE(find_unused_match(chunks, used, map, probe, index));
-	EXPECT_EQ(index, 0u);
+	size_t position = 999;
+	ASSERT_TRUE(index.find_unused(used, probe, position));
+	EXPECT_EQ(position, 0u);
 }
 
 TEST(ChunkIndex, rejects_content_differing_in_hash_or_size)
 {
 	std::vector<Chunk> chunks{ make_chunk(11, 0xA1, 512, 0) };
-	const auto map = build_chunk_map(chunks);
+	Index index(chunks);
 	std::vector<bool> used(chunks.size(), false);
-	size_t index = 999;
+	size_t position = 999;
 
-	EXPECT_FALSE(find_unused_match(chunks, used, map,
-	                               make_chunk(11, 0xFF, 512, 0), index))
+	EXPECT_FALSE(index.find_unused(used, make_chunk(11, 0xFF, 512, 0), position))
 		<< "differing strong hash must not match";
-	EXPECT_FALSE(find_unused_match(chunks, used, map,
-	                               make_chunk(11, 0xA1, 256, 0), index))
+	EXPECT_FALSE(index.find_unused(used, make_chunk(11, 0xA1, 256, 0), position))
 		<< "differing chunk size must not match";
-	EXPECT_FALSE(find_unused_match(chunks, used, map,
-	                               make_chunk(99, 0xA1, 512, 0), index))
+	EXPECT_FALSE(index.find_unused(used, make_chunk(99, 0xA1, 512, 0), position))
 		<< "differing rolling signature must not match";
 }
 
-// The map keeps only one position per distinct content, so consuming duplicates
-// depends on the fallback scan. This is what lets a delta reuse every copy of a
-// repeated chunk instead of only the last one.
-TEST(ChunkIndex, falls_back_to_scan_when_the_indexed_position_is_consumed)
+// Every copy of a repeated content must be consumable, one at a time, each
+// yielding a distinct position. This is what lets a delta reuse every copy of
+// a duplicated chunk instead of only the first.
+TEST(ChunkIndex, duplicates_are_consumed_one_position_at_a_time)
 {
 	std::vector<Chunk> chunks{
 		make_chunk(11, 0xA1, 512, 0),
 		make_chunk(11, 0xA1, 512, 512),   // duplicate content
 		make_chunk(11, 0xA1, 512, 1024),  // duplicate content
 	};
-	const auto map = build_chunk_map(chunks);
+	Index index(chunks);
 	std::vector<bool> used(chunks.size(), false);
 
-	// All three must be consumable one at a time, each yielding a distinct index.
-	std::vector<size_t> found;
+	std::vector<size_t> consumed;
 	for (int i = 0; i < 3; ++i) {
-		size_t index = 999;
-		ASSERT_TRUE(find_unused_match(chunks, used, map, chunks[0], index))
+		size_t position = 999;
+		ASSERT_TRUE(index.find_unused(used, chunks[0], position))
 			<< "duplicate copy " << i << " was not reachable";
-		ASSERT_LT(index, chunks.size());
-		EXPECT_FALSE(used[index]) << "returned an already-consumed position";
-		used[index] = true;
-		found.push_back(index);
+		ASSERT_LT(position, chunks.size());
+		EXPECT_FALSE(used[position]) << "returned an already-consumed position";
+		used[position] = true;
+		consumed.push_back(position);
 	}
 
-	std::sort(found.begin(), found.end());
-	EXPECT_EQ(found, std::vector<size_t>({0u, 1u, 2u}));
+	std::sort(consumed.begin(), consumed.end());
+	EXPECT_EQ(consumed, std::vector<size_t>({0u, 1u, 2u}));
 
 	// A fourth request has nothing left to consume.
-	size_t index = 999;
-	EXPECT_FALSE(find_unused_match(chunks, used, map, chunks[0], index));
+	size_t position = 999;
+	EXPECT_FALSE(index.find_unused(used, chunks[0], position));
+}
+
+// Delta's same-position fast path consumes chunks without going through the
+// index, so the cursor must correctly step over externally-consumed positions —
+// and must never skip a position that is still live.
+TEST(ChunkIndex, respects_flags_set_outside_the_index)
+{
+	std::vector<Chunk> chunks{
+		make_chunk(11, 0xA1, 512, 0),
+		make_chunk(11, 0xA1, 512, 512),
+		make_chunk(11, 0xA1, 512, 1024),
+	};
+	Index index(chunks);
+	std::vector<bool> used(chunks.size(), false);
+
+	// Consume the middle copy externally, as the same-position path would.
+	used[1] = true;
+
+	size_t position = 999;
+	ASSERT_TRUE(index.find_unused(used, chunks[0], position));
+	EXPECT_EQ(position, 0u);
+	used[0] = true;
+
+	// The next lookup must step over both consumed copies and land on the last.
+	ASSERT_TRUE(index.find_unused(used, chunks[0], position));
+	EXPECT_EQ(position, 2u);
+	used[2] = true;
+
+	EXPECT_FALSE(index.find_unused(used, chunks[0], position));
+}
+
+// Until the caller marks the returned position used, repeated lookups must
+// keep returning it — the index reports availability, it does not consume.
+TEST(ChunkIndex, lookup_without_consumption_is_stable)
+{
+	std::vector<Chunk> chunks{ make_chunk(11, 0xA1, 512, 0),
+	                           make_chunk(11, 0xA1, 512, 512) };
+	Index index(chunks);
+	std::vector<bool> used(chunks.size(), false);
+
+	size_t first = 999, second = 999;
+	ASSERT_TRUE(index.find_unused(used, chunks[0], first));
+	ASSERT_TRUE(index.find_unused(used, chunks[0], second));
+	EXPECT_EQ(first, second);
 }
 
 TEST(ChunkIndex, empty_index_matches_nothing)
 {
 	const std::vector<Chunk> chunks;
-	const auto map = build_chunk_map(chunks);
+	Index index(chunks);
 	const std::vector<bool> used;
 
-	size_t index = 999;
-	EXPECT_FALSE(find_unused_match(chunks, used, map,
-	                               make_chunk(11, 0xA1, 512, 0), index));
+	size_t position = 999;
+	EXPECT_FALSE(index.find_unused(used, make_chunk(11, 0xA1, 512, 0), position));
+}
+
+// The consumption cursor makes stepping past consumed duplicates O(1)
+// amortized. The predecessor rescanned the whole chunk list per lookup, which
+// went quadratic on repetitive input — this sizing (50k duplicates) finishes
+// in milliseconds amortized but took noticeable seconds quadratically. The
+// assertion is on the returned positions; the timing difference is what CI
+// timeouts would surface.
+TEST(ChunkIndex, consuming_many_duplicates_stays_cheap)
+{
+	constexpr size_t COPIES = 50000;
+	std::vector<Chunk> chunks;
+	chunks.reserve(COPIES);
+	for (size_t i = 0; i < COPIES; ++i)
+		chunks.push_back(make_chunk(11, 0xA1, 512, i * 512));
+
+	Index index(chunks);
+	std::vector<bool> used(chunks.size(), false);
+
+	for (size_t i = 0; i < COPIES; ++i) {
+		size_t position = 999;
+		ASSERT_TRUE(index.find_unused(used, chunks[0], position))
+			<< "copy " << i << " unreachable";
+		ASSERT_FALSE(used[position]);
+		used[position] = true;
+	}
+
+	size_t position = 999;
+	EXPECT_FALSE(index.find_unused(used, chunks[0], position));
 }
 
 // The mix folds the strong hash in by addition rather than `h2 << 1`, which

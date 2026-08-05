@@ -65,8 +65,8 @@ public:
         const auto& original_chunks = original.get_chunks();
         const auto& new_chunks = newfile.get_chunks();
 
-        auto chunk_map = build_chunk_map(original_chunks);
-        bool ok = processMultipleChunks(original_chunks, new_chunks, chunk_map,
+        ChunkIndex<typename T::RollingHashType> chunk_index(original_chunks);
+        bool ok = processMultipleChunks(original_chunks, new_chunks, chunk_index,
                                         old, file, writer, progress);
 
         if (ok)
@@ -93,8 +93,6 @@ private:
         size_t chunks_processed { 0 };
         DeltaError error;
     };
-
-    using ChunkMap = ::ChunkMap<typename T::RollingHashType>;
 
     // Stream-hash the entire new-file content in fixed-size buffers and emit
     // (DELTA_TRAILER_TAG | hash) so the applier can verify end-to-end
@@ -151,7 +149,7 @@ private:
     */
     bool processMultipleChunks(const std::vector<SignedChunk<typename T::RollingHashType>>& original_chunks,
                                const std::vector<SignedChunk<typename T::RollingHashType>>& new_chunks,
-                               const ChunkMap& chunk_map,
+                               ChunkIndex<typename T::RollingHashType>& chunk_index,
                                FileIO& old, FileIO& file, DeltaWriter& writer, Progress& progress) {
         std::vector<bool> original_used(original_chunks.size(), false);
 
@@ -170,13 +168,11 @@ private:
             }
 
             // Moved match: identical content located elsewhere in old. The
-            // fallback scan inside find_unused_match is what makes repeated
-            // content reusable — the index records one position per distinct
-            // content, so before this every copy after the first was re-sent in
-            // full even though the bytes were already present in the old file.
+            // index tracks every position a content occupies, so repeated
+            // content is reused copy by copy instead of being re-sent, and a
+            // consumed copy costs O(1) to step past rather than a scan.
             size_t moved_index = 0;
-            if (find_unused_match(original_chunks, original_used, chunk_map,
-                                  new_chunks[i], moved_index)) {
+            if (chunk_index.find_unused(original_used, new_chunks[i], moved_index)) {
                 entry.type = EntryType::ORIGINAL_CHUNK;
                 entry.chunk_data = new_chunks[i];
                 original_used[moved_index] = true;
