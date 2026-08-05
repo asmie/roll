@@ -1,7 +1,7 @@
 #ifndef RKFINGER_HPP
 #define RKFINGER_HPP
 
-#include "IRollingHash.hpp"
+#include "HashConcepts.hpp"
 
 #include <bit>
 #include <cstdint>
@@ -19,9 +19,15 @@ constexpr uint64_t MODULUS_DEF_SIZE = (uint64_t{1} << 31) - 1;
 
 /**
 * Rabin-Karp rolling fingerprint over a sliding window of bytes.
+*
+* Satisfies RollingHashAlgorithm. Deliberately not virtual: the fingerprint is
+* selected as a template argument, so dispatch is resolved at compile time and
+* compute_next() — which runs once per input byte — inlines into the caller.
 */
-class RKFinger : public IRollingHash<uint64_t> {
+class RKFinger {
 public:
+	using RollingHashType = uint64_t;
+
 	RKFinger() { init_state(); }
 	RKFinger(unsigned int alphabet_size, unsigned int window_size, uint64_t modulus)
 		: alphabet_size_(alphabet_size), window_size_(window_size), modulus_(modulus) {
@@ -32,6 +38,7 @@ public:
 		init_state();
 	}
 
+	~RKFinger() = default;
 	RKFinger(const RKFinger& other) = default;
 	RKFinger(RKFinger&& other) = default;
 	RKFinger& operator=(const RKFinger& other) = default;
@@ -43,7 +50,7 @@ public:
 	* than window_size bytes are available, signalling that compute_next must
 	* not be called (no full window to roll).
 	*/
-	bool initialize(std::span<const uint8_t> initial) noexcept override {
+	bool initialize(std::span<const uint8_t> initial) noexcept {
 		fingerprint_ = 0;
 		window_head_ = 0;
 		const size_t n = initial.size() < window_size_ ? initial.size() : window_size_;
@@ -60,7 +67,7 @@ public:
 	* Roll the fingerprint one byte forward: evict the oldest byte of the window
 	* and append the new one.
 	*/
-	uint64_t compute_next(uint8_t byte) noexcept override {
+	uint64_t compute_next(uint8_t byte) noexcept {
 		const uint8_t evicted = window_[window_head_];
 		fingerprint_ = reduce(alphabet_size_ * ((fingerprint_ + modulus_) - reduce(evicted * h_)) + byte);
 		window_[window_head_] = byte;
@@ -72,10 +79,10 @@ public:
 		return fingerprint_;
 	}
 
-	unsigned int get_alphabet_size() const override { return alphabet_size_; }
-	unsigned int get_window_size() const override { return window_size_; }
-	uint64_t get_modulus() const { return modulus_; }
-	uint64_t get_current_fingerprint() const override { return fingerprint_; }
+	unsigned int get_alphabet_size() const noexcept { return alphabet_size_; }
+	unsigned int get_window_size() const noexcept { return window_size_; }
+	uint64_t get_modulus() const noexcept { return modulus_; }
+	uint64_t get_current_fingerprint() const noexcept { return fingerprint_; }
 
 private:
 	/**
@@ -153,5 +160,8 @@ private:
 	size_t window_head_ { 0 };      // index of the oldest byte (evicted next)
 };
 
+
+static_assert(RollingHashAlgorithm<RKFinger>,
+              "RKFinger must satisfy RollingHashAlgorithm");
 
 #endif

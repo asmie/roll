@@ -54,10 +54,15 @@ void BLAKE2b::finalize(std::span<uint8_t> out)
 		throw std::runtime_error("BLAKE2b: EVP_DigestFinal_ex failed");
 }
 
+void BLAKE2b::hash(std::span<uint8_t> out, std::span<const uint8_t> in)
+{
+	hash_oneshot(*this, out, in);
+}
+
 void BLAKE2b::hash(uint8_t* out, const uint8_t* in, uint64_t inlen)
 {
 	if (out == nullptr || (in == nullptr && inlen != 0))
 		return;
-	IHash::hash(std::span<uint8_t>{out, HASH_SIZE},
-	            std::span<const uint8_t>{in, static_cast<size_t>(inlen)});
+	hash(std::span<uint8_t>{out, HASH_SIZE},
+	     std::span<const uint8_t>{in, static_cast<size_t>(inlen)});
 }

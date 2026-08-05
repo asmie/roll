@@ -694,6 +694,9 @@ TEST(Apply, truncated_partial_header_fails)
 
 	auto raw = read_all(DELTA);
 	constexpr size_t trailer_size = 1 + BLAKE2b::HASH_SIZE;
+	// Guard the iterator arithmetic below: `raw.end() - trailer_size` is out of
+	// range, not merely wrong, if the delta is ever shorter than its trailer.
+	ASSERT_GE(raw.size(), trailer_size);
 	const uint8_t partial[] = {0x00, 0x01, 0x02, 0x03};  // < 8 bytes of u64 entry_type
 	raw.insert(raw.end() - trailer_size, std::begin(partial), std::end(partial));
 	write_bytes(DELTA, raw);
@@ -725,8 +728,11 @@ TEST(Apply, rejects_missing_trailer)
 	// Strip the trailer (1 tag + hash_size).
 	auto raw = read_all(DELTA);
 	constexpr size_t trailer_size = 1 + BLAKE2b::HASH_SIZE;
+	// Clamp rather than relying on the assertion above to bound the subtraction:
+	// ASSERT_GT returns at run time, but the optimiser cannot see that, and an
+	// unbounded size_t subtraction here trips -Wstringop-overflow.
 	ASSERT_GT(raw.size(), trailer_size);
-	raw.resize(raw.size() - trailer_size);
+	raw.resize(raw.size() > trailer_size ? raw.size() - trailer_size : 0);
 	write_bytes(DELTA, raw);
 
 	Apply<RKFinger, BLAKE2b> apply;

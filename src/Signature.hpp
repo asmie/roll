@@ -2,21 +2,12 @@
 #define SIGNATURE_HPP
 
 #include "DeltaFormat.hpp"
-#include "IHash.hpp"
-#include "IRollingHash.hpp"
 #include "FileIO.hpp"
+#include "HashConcepts.hpp"
 
 #include <filesystem>
 #include <vector>
 #include <concepts>
-
-template <class T>
-concept RollingHashAlgorithm =
-	requires { typename T::RollingHashType; } &&
-	std::derived_from<T, IRollingHash<typename T::RollingHashType>>;
-
-template <class U>
-concept StrongHashAlgorithm = std::derived_from<U, IHash>;
 
 /**
 * Structure representing signed chunk of data.

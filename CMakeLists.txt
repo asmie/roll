@@ -127,6 +127,7 @@ set(RH_TEST_SOURCES
     tests/DeltaCodec_tests.cpp
     tests/DeltaViewer_tests.cpp
     tests/FileIO_tests.cpp
+    tests/HashConcepts_tests.cpp
     tests/RK_finger_tests.cpp
     tests/Signature_tests.cpp
     tests/main_tests.cpp
