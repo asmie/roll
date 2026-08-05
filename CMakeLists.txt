@@ -144,32 +144,52 @@ set(RH_TEST_SOURCES
     tests/main_tests.cpp
 )
 
-# Include header files
-include_directories(src ${CMAKE_CURRENT_BINARY_DIR}/generated)
+# ---- Targets --------------------------------------------------------------
 
 # Find packages
 find_package(Threads REQUIRED)
 # OpenSSL 1.1.0+ exposes EVP_blake2b512(); modern distros ship 3.x.
 find_package(OpenSSL 1.1.0 REQUIRED)
 
+# Shared object library so the production sources are compiled once rather than
+# once per executable, and so include paths and link dependencies are declared
+# on a target instead of leaking to the whole directory via include_directories.
+add_library(rh_core OBJECT ${RH_SOURCES})
+target_compile_features(rh_core PUBLIC cxx_std_23)
+target_include_directories(rh_core PUBLIC
+    "${PROJECT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated")
+target_link_libraries(rh_core PUBLIC Threads::Threads OpenSSL::Crypto)
+
 # Create executable
-add_executable(${PROJECT_NAME} ${RH_SOURCES} src/main.cpp)
-target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_23)
-target_link_libraries(${PROJECT_NAME} Threads::Threads OpenSSL::Crypto ${ADDITIONAL_LIBRARIES})
+add_executable(${PROJECT_NAME} src/main.cpp)
+target_link_libraries(${PROJECT_NAME} PRIVATE rh_core)
 
-# Testing time
-enable_testing()
+# ---- Install --------------------------------------------------------------
 
-include(FetchContent)
-FetchContent_Declare(
-        googletest
-        URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
-        DOWNLOAD_EXTRACT_TIMESTAMP false
-)
-FetchContent_MakeAvailable(googletest)
+include(GNUInstallDirs)
+install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-include(GoogleTest)
-add_executable(${PROJECT_NAME}_unit ${RH_TEST_SOURCES} ${RH_SOURCES})
-target_compile_features(${PROJECT_NAME}_unit PRIVATE cxx_std_23)
-target_link_libraries(${PROJECT_NAME}_unit PUBLIC gtest_main pthread OpenSSL::Crypto ${CMAKE_DL_LIBS} ${ADDITIONAL_LIBRARIES})
-gtest_discover_tests(${PROJECT_NAME}_unit)
+# ---- Testing --------------------------------------------------------------
+#
+# Gated so a consumer who only wants the binary neither downloads GoogleTest nor
+# needs network access at configure time. include(CTest) defines BUILD_TESTING
+# (default ON) and is the convention other projects expect to be able to switch.
+
+include(CTest)
+option(RH_BUILD_TESTS "Build the unit test target" ${BUILD_TESTING})
+
+if (RH_BUILD_TESTS)
+    include(FetchContent)
+    FetchContent_Declare(
+            googletest
+            URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+            DOWNLOAD_EXTRACT_TIMESTAMP false
+    )
+    FetchContent_MakeAvailable(googletest)
+
+    include(GoogleTest)
+    add_executable(${PROJECT_NAME}_unit ${RH_TEST_SOURCES})
+    target_link_libraries(${PROJECT_NAME}_unit PRIVATE rh_core gtest)
+    gtest_discover_tests(${PROJECT_NAME}_unit)
+endif()

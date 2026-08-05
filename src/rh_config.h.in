@@ -77,4 +77,14 @@
 #error "rolling_hash needs std::byteswap, std::endian, std::span, std::filesystem, std::to_underlying, std::expected, and std::derived_from."
 #endif
 
+// A specific and easily-mistaken combination: Clang before 19 reports
+// __cpp_concepts as 201907 rather than 202002 (it lacked P0848R3), and
+// libstdc++ gates <expected> on __cpp_concepts >= 202002L. So Clang 18 with
+// libstdc++ compiles as C++23 yet has no std::expected, and the failure above
+// looks like a missing standard library rather than a compiler mismatch.
+// Either use GCC 13+, Clang 19+, or Clang with -stdlib=libc++.
+#if !defined(RH_HAVE_STD_EXPECTED) && defined(__clang__) && (__clang_major__ < 19)
+#error "Clang < 19 with libstdc++ has no std::expected (it under-reports __cpp_concepts). Use GCC 13+, Clang 19+, or add -stdlib=libc++."
+#endif
+
 #endif /* GENERATED_RH_CONFIG_H_IN */

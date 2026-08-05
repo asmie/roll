@@ -1,0 +1,40 @@
+# Matches the existing sources rather than imposing a new house style: tabs for
+# indentation, attached braces, and generous line length. AGENTS.md already
+# specifies tabs and PascalCase/lowerCamelCase naming; this makes the mechanical
+# half of that enforceable instead of a matter of review.
+#
+# Note the tree is not uniform: Delta.hpp and DeltaFormat.hpp use four spaces
+# while the rest uses tabs. Reformatting everything at once would bury the
+# recent history in whitespace, so this config describes the majority style and
+# is best applied to new or already-touched code (`git clang-format`).
+Language: Cpp
+BasedOnStyle: LLVM
+
+UseTab: ForIndentation
+IndentWidth: 4
+TabWidth: 4
+ColumnLimit: 90
+
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true
+  AfterClass: false
+  AfterControlStatement: Never
+  AfterEnum: false
+  AfterStruct: false
+  AfterNamespace: false
+  BeforeCatch: false
+  BeforeElse: false
+
+AccessModifierOffset: -4
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AlwaysBreakTemplateDeclarations: Yes
+FixNamespaceComments: true
+IndentCaseLabels: true
+PointerAlignment: Left
+SpaceAfterTemplateKeyword: false
+
+# Project headers first, then the standard library, matching the existing files.
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive
