@@ -1,6 +1,7 @@
 #ifndef DELTA_HPP
 #define DELTA_HPP
 
+#include "ChunkIndex.hpp"
 #include "DeltaFormat.hpp"
 #include "Signature.hpp"
 #include "FileIO.hpp"
@@ -9,11 +10,9 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <filesystem>
 #include <span>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -74,7 +73,7 @@ public:
         const auto& original_chunks = original.get_chunks();
         const auto& new_chunks = newfile.get_chunks();
 
-        auto chunk_map = buildChunkMap(original_chunks);
+        auto chunk_map = build_chunk_map(original_chunks);
         bool ok = processMultipleChunks(original_chunks, new_chunks, chunk_map,
                                         old, file, delta, result);
 
@@ -93,38 +92,7 @@ public:
     }
 
 private:
-    // Hash function for chunk lookup
-    struct ChunkHash {
-        size_t operator()(const SignedChunk<typename T::RollingHashType>& chunk) const {
-            size_t h1 = std::hash<typename T::RollingHashType>{}(chunk.signature);
-            size_t h2 = 0;
-            if (chunk.hash.size() >= sizeof(size_t))
-                std::memcpy(&h2, chunk.hash.data(), sizeof(size_t));
-            return h1 ^ (h2 << 1);
-        }
-    };
-
-    struct ChunkEqual {
-        bool operator()(const SignedChunk<typename T::RollingHashType>& a,
-                       const SignedChunk<typename T::RollingHashType>& b) const {
-            return a == b;
-        }
-    };
-
-    using ChunkMap = std::unordered_map<SignedChunk<typename T::RollingHashType>,
-                                        size_t, ChunkHash, ChunkEqual>;
-
-    /**
-    * Build hash map of chunks for O(1) lookups
-    */
-    ChunkMap buildChunkMap(const std::vector<SignedChunk<typename T::RollingHashType>>& chunks) {
-        ChunkMap map;
-        map.reserve(chunks.size());
-        for (size_t i = 0; i < chunks.size(); ++i) {
-            map[chunks[i]] = i;
-        }
-        return map;
-    }
+    using ChunkMap = ::ChunkMap<typename T::RollingHashType>;
 
     // Stream-hash the entire new-file content in fixed-size buffers and emit
     // (DELTA_TRAILER_TAG | hash) so the applier can verify end-to-end

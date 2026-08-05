@@ -123,6 +123,7 @@ set(RH_SOURCES
 set(RH_TEST_SOURCES
     tests/Apply_tests.cpp
     tests/Blake_tests.cpp
+    tests/ChunkIndex_tests.cpp
     tests/DeltaViewer_tests.cpp
     tests/FileIO_tests.cpp
     tests/RK_finger_tests.cpp

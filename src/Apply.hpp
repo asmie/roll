@@ -1,6 +1,7 @@
 #ifndef APPLY_HPP
 #define APPLY_HPP
 
+#include "ChunkIndex.hpp"
 #include "Delta.hpp"
 #include "DeltaFormat.hpp"
 #include "FileIO.hpp"
@@ -14,7 +15,6 @@
 #include <span>
 #include <string>
 #include <system_error>
-#include <unordered_map>
 #include <vector>
 
 /**
@@ -123,7 +123,7 @@ private:
 		old_sig.generate_signatures(old_file);
 		const auto& old_chunks = old_sig.get_chunks();
 
-		auto chunk_map = buildChunkMap(old_chunks);
+		auto chunk_map = build_chunk_map(old_chunks);
 		std::vector<bool> original_used(old_chunks.size(), false);
 
 		U hash_func;
@@ -202,7 +202,7 @@ private:
 					probe.start_offset = 0;
 
 					size_t k;
-					if (!findUnusedMatch(old_chunks, original_used, chunk_map, probe, k)) {
+					if (!find_unused_match(old_chunks, original_used, chunk_map, probe, k)) {
 						result.error_message = "ORIGINAL entry references unknown chunk";
 						return result;
 					}
@@ -286,7 +286,7 @@ private:
 					probe.start_offset = 0;
 
 					size_t k;
-					if (!findUnusedMatch(old_chunks, original_used, chunk_map, probe, k)) {
+					if (!find_unused_match(old_chunks, original_used, chunk_map, probe, k)) {
 						result.error_message = "REMOVED entry references unknown or already-consumed old chunk";
 						return result;
 					}
@@ -319,55 +319,7 @@ private:
 		return result;
 	}
 
-	struct ChunkHash {
-		size_t operator()(const SignedChunk<typename T::RollingHashType>& c) const {
-			size_t h1 = std::hash<typename T::RollingHashType>{}(c.signature);
-			size_t h2 = 0;
-			if (c.hash.size() >= sizeof(size_t))
-				std::memcpy(&h2, c.hash.data(), sizeof(size_t));
-			// boost::hash_combine-style mix — `h1 ^ (h2 << 1)` collided too
-			// easily on adjacent signatures with similar hash prefixes.
-			return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
-		}
-	};
-
-	struct ChunkEqual {
-		bool operator()(const SignedChunk<typename T::RollingHashType>& a,
-		                const SignedChunk<typename T::RollingHashType>& b) const {
-			return a == b;
-		}
-	};
-
-	using ChunkMap = std::unordered_map<SignedChunk<typename T::RollingHashType>,
-	                                    size_t, ChunkHash, ChunkEqual>;
-
-	ChunkMap buildChunkMap(const std::vector<SignedChunk<typename T::RollingHashType>>& chunks) {
-		ChunkMap map;
-		map.reserve(chunks.size());
-		for (size_t i = 0; i < chunks.size(); ++i)
-			map[chunks[i]] = i;
-		return map;
-	}
-
-	bool findUnusedMatch(const std::vector<SignedChunk<typename T::RollingHashType>>& old_chunks,
-	                     const std::vector<bool>& original_used,
-	                     const ChunkMap& chunk_map,
-	                     const SignedChunk<typename T::RollingHashType>& probe,
-	                     size_t& out_index) {
-		auto it = chunk_map.find(probe);
-		if (it != chunk_map.end() && !original_used[it->second]) {
-			out_index = it->second;
-			return true;
-		}
-		// Map's preferred index is consumed (duplicate chunk content) — scan for any unused match.
-		for (size_t i = 0; i < old_chunks.size(); ++i) {
-			if (!original_used[i] && old_chunks[i] == probe) {
-				out_index = i;
-				return true;
-			}
-		}
-		return false;
-	}
+	using ChunkMap = ::ChunkMap<typename T::RollingHashType>;
 
 	bool verifyHash(U& hash_func, size_t hash_size,
 	                std::span<const uint8_t> chunk_data,
