@@ -1,6 +1,8 @@
 #include "FileIO.hpp"
 
+#include <algorithm>
 #include <bit>
+#include <cstring>
 #include <fstream>
 #include <system_error>
 
@@ -21,6 +23,8 @@ bool FileIO::open(const std::filesystem::path& file_path, FileMode mode)
 
 	if (f_.is_open())
 		f_.close();
+
+	discard_read_buffer();
 
 	// Clear any failbit/eofbit left over from a previous lifecycle so an open
 	// on a fresh path isn't reported as failed.
@@ -48,23 +52,65 @@ bool FileIO::close()
 	return !f_.fail();
 }
 
-// This can be optimized - there is possibility to read data chunk and store it to the buffer, then 
-// read single byte from that buffer. If buffer drops under the specified size we can launch async job
-// to get new chunk to the buffer.
+bool FileIO::refill()
+{
+	rpos_ = 0;
+	rlen_ = 0;
+
+	if (!f_.is_open())
+		return false;
+
+	if (rbuf_.size() != READ_BUFFER_SIZE)
+		rbuf_.resize(READ_BUFFER_SIZE);
+
+	f_.read(reinterpret_cast<char*>(rbuf_.data()),
+	        static_cast<std::streamsize>(rbuf_.size()));
+	const std::streamsize got = f_.gcount();
+	if (got <= 0)
+		return false;
+
+	rlen_ = static_cast<size_t>(got);
+
+	// A partial fill leaves eofbit and failbit set. We still hold bytes to hand
+	// out, and a positioned read may follow, so clear the flags here and let the
+	// next refill rediscover the end of file. is_eof() reports the logical state
+	// by also checking whether the buffer is drained.
+	if (f_.fail())
+		f_.clear();
+
+	return true;
+}
+
+void FileIO::unread_buffer()
+{
+	const size_t buffered = rlen_ - rpos_;
+	discard_read_buffer();
+
+	if (buffered > 0) {
+		f_.clear();
+		f_.seekg(-static_cast<std::streamoff>(buffered), std::ios::cur);
+	}
+}
+
 int FileIO::read_byte()
 {
-	return f_.get();
+	if (rpos_ == rlen_ && !refill())
+		return EOF;
+	return rbuf_[rpos_++];
 }
 
 bool FileIO::write_byte(uint8_t byte)
 {
+	unread_buffer();
 	f_.put(byte);
 	return f_.good();
 }
 
 int FileIO::peek_byte()
 {
-	return f_.peek();
+	if (rpos_ == rlen_ && !refill())
+		return EOF;
+	return rbuf_[rpos_];
 }
 
 std::vector<uint8_t> FileIO::read_chunk(size_t chunk_size)
@@ -81,8 +127,25 @@ std::vector<uint8_t> FileIO::read_chunk(size_t chunk_size)
 		chunk_size = size_;
 
 	std::vector<uint8_t> vec(chunk_size);
-	f_.read(reinterpret_cast<char*>(vec.data()), chunk_size);
-	vec.resize(static_cast<size_t>(f_.gcount()));  // trim to actually read
+	size_t filled = 0;
+
+	// Hand back anything read_byte()/peek_byte() pulled ahead but the caller has
+	// not consumed, so the byte-wise and bulk APIs interleave transparently.
+	// Apply relies on this: it peeks an opcode tag, then bulk-reads its payload.
+	const size_t buffered = rlen_ - rpos_;
+	if (buffered > 0) {
+		filled = std::min(buffered, chunk_size);
+		std::memcpy(vec.data(), rbuf_.data() + rpos_, filled);
+		rpos_ += filled;
+	}
+
+	if (filled < chunk_size) {
+		f_.read(reinterpret_cast<char*>(vec.data() + filled),
+		        static_cast<std::streamsize>(chunk_size - filled));
+		filled += static_cast<size_t>(f_.gcount());
+	}
+
+	vec.resize(filled);  // trim to actually read
 
 	// Clamping must not hide end-of-file from callers. std::istream::read sets
 	// eofbit *and* failbit when it cannot supply the full request, and code
@@ -97,6 +160,10 @@ std::vector<uint8_t> FileIO::read_chunk(size_t chunk_size)
 
 std::vector<uint8_t> FileIO::read_chunk(size_t chunk_size, size_t position)
 {
+	// The read-ahead belongs to the old position, and we are about to seek to an
+	// absolute offset, so drop it without rewinding.
+	discard_read_buffer();
+
 	// Clear EOF/fail state so seekg can re-position after a previous read
 	// reached end-of-file (seekg is a no-op while failbit is set).
 	f_.clear();
@@ -106,12 +173,14 @@ std::vector<uint8_t> FileIO::read_chunk(size_t chunk_size, size_t position)
 
 bool FileIO::write_chunk(std::span<const uint8_t> chunk)
 {
+	unread_buffer();
 	f_.write(reinterpret_cast<const char*>(chunk.data()), chunk.size());
 	return f_.good();
 }
 
 bool FileIO::write_chunk(uint64_t chunk)
 {
+	unread_buffer();
 	if constexpr (std::endian::native == std::endian::little)
 		chunk = std::byteswap(chunk);
 
