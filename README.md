@@ -27,8 +27,9 @@ hashing, file I/O, signatures, delta application, and rolling fingerprints.
   8 KiB target average chunk size.
 - Dual chunk identity checks using a rolling fingerprint plus BLAKE2b-512.
 - Delta entries for original, added, modified, and removed chunks.
-- Repeated content is reused rather than re-sent, so a reordered or duplicated
-  block costs one reference instead of a full copy.
+- Repeated content is reused rather than re-sent: a reordered or duplicated block
+  costs a ~19-byte reference per occurrence instead of a full copy. Doubling a
+  40 MB zero-filled file produces a 103 KB delta.
 - A byte-level diff is emitted only when it is actually smaller than storing the
   chunk outright, which bounds a delta at roughly the size of its input.
 - Delta application verifies each generated payload against its chunk hash and
@@ -148,11 +149,15 @@ Inspect a delta:
 ```
 
 The delta file is a versioned binary stream. It opens with a 4-byte magic and a
-big-endian format version, followed by chunk records, and closes with a trailer
-holding a hash of the whole reconstructed file. Each record stores an entry type,
-rolling signature, BLAKE2b-512 hash, chunk size, and — for added or modified
-chunks — payload data. `src/DeltaCodec.hpp` is the single definition of the
-layout; `rolling_hash view` prints it.
+big-endian format version, followed by one entry per chunk of the reconstructed
+file, and closes with a trailer holding a hash of the whole result.
+
+Entries name their source chunk in the old file **by index**, so one old chunk
+can back any number of new ones — repeated content costs about 19 bytes per
+occurrence instead of a copy. Each entry carries a 128-bit digest truncated from
+BLAKE2b-512, which both identifies the chunk and verifies it; lengths and indices
+are varints. `src/DeltaCodec.hpp` is the single definition of the layout, and
+`rolling_hash view` prints it.
 
 ## Example
 
@@ -176,11 +181,12 @@ If `cmp` exits successfully, the reconstructed file matches the new file.
 
 1. `Signature` reads each input file and splits it into variable-sized chunks.
 2. Every chunk receives a Rabin-Karp rolling fingerprint and a BLAKE2b-512 hash.
-3. `Delta` compares the old and new signatures, emitting records for reused,
-   added, modified, and removed chunks. A chunk whose content exists anywhere in
-   the old file becomes a reference rather than a copy, even if it appears
-   several times.
-4. Modified chunks store compact byte-level diff opcodes, computed with Myers'
+3. `Delta` compares the old and new signatures and emits one entry per new
+   chunk. A chunk whose content exists anywhere in the old file becomes a
+   reference to it rather than a copy — however many times it recurs, and
+   without needing a matching entry for old chunks that are simply gone.
+4. Chunks whose content is not in the old file at all are shipped whole;
+   otherwise a modified chunk stores compact byte-level diff opcodes, computed with Myers'
    O(ND) algorithm (falling back to a greedy diff when the edit distance is
    large):
    - `D`: replace bytes at a position.

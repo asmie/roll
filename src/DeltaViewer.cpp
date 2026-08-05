@@ -20,7 +20,6 @@ const char* entryTypeToString(EntryType type) {
 		case EntryType::ORIGINAL_CHUNK: return "ORIGINAL";
 		case EntryType::ADDED_CHUNK:    return "ADDED";
 		case EntryType::MODIFIED_CHUNK: return "MODIFIED";
-		case EntryType::REMOVED_CHUNK:  return "REMOVED";
 	}
 	return "UNKNOWN";
 }
@@ -164,27 +163,20 @@ int view_delta(const std::filesystem::path& delta_file) {
 			return 1;
 		}
 
-		if (static_cast<uint64_t>(header.type) >
-		    static_cast<uint64_t>(EntryType::REMOVED_CHUNK)) {
-			std::cerr << "Error: Unknown entry type "
-			          << static_cast<uint64_t>(header.type)
-			          << " in chunk #" << (chunkNum + 1) << std::endl;
-			return 1;
-		}
-
 		std::cout << "Chunk #" << ++chunkNum << ":" << std::endl;
 		std::cout << "  Type: " << entryTypeToString(header.type)
-		          << " (" << static_cast<uint64_t>(header.type) << ")" << std::endl;
-		std::cout << "  Signature: 0x" << std::hex << header.signature
-		          << std::dec << std::endl;
-		std::cout << "  Chunk Size: " << header.chunk_size << " bytes" << std::endl;
-		std::cout << "  Hash: ";
-		printHex(header.hash);
+		          << " (" << static_cast<unsigned>(header.type) << ")" << std::endl;
+		if (header.references_old())
+			std::cout << "  Source: old chunk #" << header.old_index << std::endl;
+		if (header.type != EntryType::ORIGINAL_CHUNK)
+			std::cout << "  Output Size: " << header.out_size << " bytes" << std::endl;
+		std::cout << "  Digest: ";
+		printHex(header.digest);
 		std::cout << std::endl;
 
 		if (header.type == EntryType::ADDED_CHUNK) {
 			std::vector<uint8_t> rawData;
-			if (!reader.read_payload(static_cast<size_t>(header.chunk_size), rawData)) {
+			if (!reader.read_payload(static_cast<size_t>(header.out_size), rawData)) {
 				std::cerr << "Error: Truncated ADDED payload in chunk #"
 				          << chunkNum << std::endl;
 				return 1;

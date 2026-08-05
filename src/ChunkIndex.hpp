@@ -12,20 +12,25 @@
 /**
 * Hash for content-addressed chunk lookup.
 *
-* Delta and Apply both need this, and both carried their own verbatim copy of
-* the hash and equality functors. The copies drifted: `h1 ^ (h2 << 1)` was
-* found to collide too easily on adjacent signatures sharing a hash prefix and
-* was replaced with a hash_combine-style mix in one copy, while the other kept
-* the weak version. A single definition is what stops that from recurring.
+* Only Delta needs this now — the applier follows explicit chunk indices rather
+* than searching by content — but it stays shared because both once carried
+* verbatim copies of the hash and equality functors and the copies drifted:
+* `h1 ^ (h2 << 1)` collided too easily and was fixed in one copy only. A single
+* definition is what stops that recurring.
 */
 template <class T>
 struct ChunkHash {
 	size_t operator()(const SignedChunk<T>& chunk) const {
-		size_t h1 = std::hash<T>{}(chunk.signature);
-		size_t h2 = 0;
+		// The digest is already uniformly distributed, so two of its words mixed
+		// hash_combine-style is enough — no need to fold in the rolling
+		// signature, which is not part of chunk identity. Mixing two words
+		// rather than one keeps chunks whose digests share a prefix apart.
+		size_t lo = 0, hi = 0;
 		if (chunk.hash.size() >= sizeof(size_t))
-			std::memcpy(&h2, chunk.hash.data(), sizeof(size_t));
-		return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+			std::memcpy(&lo, chunk.hash.data(), sizeof(size_t));
+		if (chunk.hash.size() >= 2 * sizeof(size_t))
+			std::memcpy(&hi, chunk.hash.data() + sizeof(size_t), sizeof(size_t));
+		return lo ^ (hi + 0x9e3779b97f4a7c15ULL + (lo << 6) + (lo >> 2));
 	}
 };
 

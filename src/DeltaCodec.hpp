@@ -4,6 +4,7 @@
 #include "DeltaFormat.hpp"
 #include "FileIO.hpp"
 
+#include <algorithm>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -17,35 +18,30 @@
 *
 * Reader and writer live together deliberately. The format previously had three
 * independent implementations — the writer in Delta, the reader in Apply, and a
-* second reader in DeltaViewer — each with its own big-endian integer helpers
-* and its own idea of the digest length. They drifted: the viewer hard-coded a
-* 64-byte hash while the applier asked the hash object, so changing the digest
-* would have silently broken inspection only. Anything about the byte layout
-* belongs here, so a format change is one edit rather than three.
+* second reader in DeltaViewer — each with its own integer helpers and its own
+* idea of the digest length. They drifted: the viewer hard-coded a 64-byte hash
+* while the applier asked the hash object, so changing the digest would have
+* silently broken inspection only. Anything about the byte layout belongs here,
+* so a format change is one edit rather than three.
 *
 * Layout:
-*   header  : DELTA_MAGIC[4] | version:u32
-*   entry   : type:u64 | signature:u64 | hash:hash_size | chunk_size:u64
-*             followed by chunk_size payload bytes for ADDED, or a diff opcode
-*             run for MODIFIED
-*   opcode  : 'D'|'I' | pos:u32 | count:u8 | count bytes
-*             'X'     | pos:u32 | length:u32
-*   trailer : DELTA_TRAILER_TAG | hash:hash_size
+*   header   : DELTA_MAGIC[4] | version:u32be
+*   entry    : type:u8 | body, where body is
+*                ORIGINAL : old_index:varint | digest
+*                ADDED    : out_size:varint  | digest | out_size payload bytes
+*                MODIFIED : old_index:varint | out_size:varint | digest | opcodes
+*   opcode   : 'D'|'I' | pos:u32be | count:u8 | count bytes
+*              'X'     | pos:u32be | length:u32be
+*   trailer  : DELTA_TRAILER_TAG | whole-file digest
 *
-* All multi-byte integers are big-endian.
+* Lengths and indices are LEB128 varints: a chunk index and a chunk size both
+* fit in one or two bytes in practice, but must remain able to express a 64-bit
+* value. Fixed-width fields (the version, opcode positions) stay big-endian.
 */
 
-// ---- Big-endian integer primitives ---------------------------------------
+// ---- Integer primitives --------------------------------------------------
 
 inline void push_u32_be(std::vector<uint8_t>& out, uint32_t value)
-{
-	if constexpr (std::endian::native == std::endian::little)
-		value = std::byteswap(value);
-	const auto* bytes = reinterpret_cast<const uint8_t*>(&value);
-	out.insert(out.end(), bytes, bytes + sizeof(value));
-}
-
-inline void push_u64_be(std::vector<uint8_t>& out, uint64_t value)
 {
 	if constexpr (std::endian::native == std::endian::little)
 		value = std::byteswap(value);
@@ -62,23 +58,42 @@ inline uint32_t load_u32_be(const uint8_t* src)
 	return value;
 }
 
-inline uint64_t load_u64_be(const uint8_t* src)
+/// Longest LEB128 encoding of a 64-bit value: nine full groups plus a final bit.
+inline constexpr size_t VARINT_MAX_BYTES = 10;
+
+inline void push_varint(std::vector<uint8_t>& out, uint64_t value)
 {
-	uint64_t value;
-	std::memcpy(&value, src, sizeof(value));
-	if constexpr (std::endian::native == std::endian::little)
-		value = std::byteswap(value);
-	return value;
+	while (value >= 0x80) {
+		out.push_back(static_cast<uint8_t>(value) | 0x80);
+		value >>= 7;
+	}
+	out.push_back(static_cast<uint8_t>(value));
+}
+
+[[nodiscard]] inline size_t varint_size(uint64_t value)
+{
+	size_t n = 1;
+	while (value >= 0x80) {
+		value >>= 7;
+		++n;
+	}
+	return n;
 }
 
 // ---- Wire structures -----------------------------------------------------
 
-/// One entry header as it appears on the wire, without its payload.
+/// One entry header as it appears on the wire, without any payload. Which
+/// fields carry meaning depends on `type`; see the layout above.
 struct DeltaEntryHeader {
 	EntryType type {};
-	uint64_t signature {};
-	std::vector<uint8_t> hash;
-	uint64_t chunk_size {};
+	uint64_t old_index {};   ///< ORIGINAL, MODIFIED: source chunk in the old file
+	uint64_t out_size {};    ///< ADDED, MODIFIED: bytes this entry contributes
+	std::vector<uint8_t> digest;
+
+	[[nodiscard]] bool references_old() const noexcept
+	{
+		return type == EntryType::ORIGINAL_CHUNK || type == EntryType::MODIFIED_CHUNK;
+	}
 };
 
 /// One diff opcode. `bytes` carries the inline payload for 'D'/'I';
@@ -89,15 +104,6 @@ struct DiffOpcode {
 	uint32_t delete_length {};
 	std::vector<uint8_t> bytes;
 };
-
-/**
-* Bytes one entry header occupies on the wire, excluding any payload:
-* type:u64 | signature:u64 | hash | chunk_size:u64.
-*/
-[[nodiscard]] inline constexpr size_t delta_entry_header_size(size_t hash_size)
-{
-	return 3 * sizeof(uint64_t) + hash_size;
-}
 
 [[nodiscard]] inline bool is_diff_opcode(int byte)
 {
@@ -123,22 +129,43 @@ public:
 		return emit(header, "delta header");
 	}
 
-	/**
-	* Write one entry. `payload` carries the raw chunk bytes for ADDED or the
-	* diff opcode run for MODIFIED, and must be empty for ORIGINAL/REMOVED.
-	*/
-	[[nodiscard]] bool write_entry(EntryType type, uint64_t signature,
-	                 std::span<const uint8_t> hash, uint64_t chunk_size,
-	                 std::span<const uint8_t> payload)
+	/// Reuse an old chunk verbatim.
+	[[nodiscard]] bool write_original(uint64_t old_index, std::span<const uint8_t> digest)
 	{
 		std::vector<uint8_t> record;
-		record.reserve(3 * sizeof(uint64_t) + hash.size() + payload.size());
-		push_u64_be(record, static_cast<uint64_t>(type));
-		push_u64_be(record, signature);
-		record.insert(record.end(), hash.begin(), hash.end());
-		push_u64_be(record, chunk_size);
+		record.reserve(1 + VARINT_MAX_BYTES + digest.size());
+		record.push_back(static_cast<uint8_t>(EntryType::ORIGINAL_CHUNK));
+		push_varint(record, old_index);
+		record.insert(record.end(), digest.begin(), digest.end());
+		return emit(record, "ORIGINAL entry");
+	}
+
+	/// Supply new bytes verbatim.
+	[[nodiscard]] bool write_added(std::span<const uint8_t> digest,
+	                               std::span<const uint8_t> payload)
+	{
+		std::vector<uint8_t> record;
+		record.reserve(1 + VARINT_MAX_BYTES + digest.size() + payload.size());
+		record.push_back(static_cast<uint8_t>(EntryType::ADDED_CHUNK));
+		push_varint(record, payload.size());
+		record.insert(record.end(), digest.begin(), digest.end());
 		record.insert(record.end(), payload.begin(), payload.end());
-		return emit(record, "delta entry");
+		return emit(record, "ADDED entry");
+	}
+
+	/// Rebuild a chunk from an old one plus a diff opcode run.
+	[[nodiscard]] bool write_modified(uint64_t old_index, uint64_t out_size,
+	                                  std::span<const uint8_t> digest,
+	                                  std::span<const uint8_t> opcodes)
+	{
+		std::vector<uint8_t> record;
+		record.reserve(1 + 2 * VARINT_MAX_BYTES + digest.size() + opcodes.size());
+		record.push_back(static_cast<uint8_t>(EntryType::MODIFIED_CHUNK));
+		push_varint(record, old_index);
+		push_varint(record, out_size);
+		record.insert(record.end(), digest.begin(), digest.end());
+		record.insert(record.end(), opcodes.begin(), opcodes.end());
+		return emit(record, "MODIFIED entry");
 	}
 
 	[[nodiscard]] bool write_trailer(std::span<const uint8_t> digest)
@@ -172,16 +199,18 @@ private:
 // ---- Reader --------------------------------------------------------------
 
 /**
-* Reads the delta stream from a FileIO. `hash_size` is the digest length the
-* stream was written with, taken from the strong hash in use rather than
-* assumed, so a digest change cannot silently desynchronise one reader.
+* Reads the delta stream from a FileIO.
+*
+* `trailer_digest_size` is the whole-file digest length, taken from the strong
+* hash in use rather than assumed. Per-entry digests are DELTA_DIGEST_BYTES.
 */
 class DeltaReader {
 public:
 	/// What comes next in the stream.
 	enum class Item { Entry, Trailer, End };
 
-	DeltaReader(FileIO& in, size_t hash_size) : in_(in), hash_size_(hash_size) {}
+	DeltaReader(FileIO& in, size_t trailer_digest_size)
+		: in_(in), trailer_digest_size_(trailer_digest_size) {}
 
 	[[nodiscard]] bool read_header()
 	{
@@ -213,28 +242,41 @@ public:
 	}
 
 	/**
-	* Read an entry header and validate the declared chunk size against the
-	* format bound. The size field is attacker-controlled and feeds allocations
-	* downstream, so it is checked here rather than at each use.
+	* Read an entry header, validating the type tag and bounding any declared
+	* output size against the format maximum. That size field is
+	* attacker-controlled and feeds allocations downstream, so it is checked here
+	* rather than at each use.
 	*/
 	[[nodiscard]] bool read_entry_header(DeltaEntryHeader& out)
 	{
-		std::vector<uint8_t> buf;
-		if (!read_exact(2 * sizeof(uint64_t) + hash_size_ + sizeof(uint64_t), buf)) {
-			error_ = "Truncated delta: partial entry header";
+		const int tag = in_.read_byte();
+		if (tag == EOF) {
+			error_ = "Truncated delta: missing entry type";
+			return false;
+		}
+		if (static_cast<uint8_t>(tag) >= DELTA_ENTRY_TYPE_LIMIT) {
+			error_ = "Unknown entry type in delta: " + std::to_string(tag);
 			return false;
 		}
 
-		const uint8_t* p = buf.data();
-		out.type = static_cast<EntryType>(load_u64_be(p));
-		out.signature = load_u64_be(p + sizeof(uint64_t));
-		out.hash.assign(p + 2 * sizeof(uint64_t),
-		                p + 2 * sizeof(uint64_t) + hash_size_);
-		out.chunk_size = load_u64_be(p + 2 * sizeof(uint64_t) + hash_size_);
+		out = DeltaEntryHeader{};
+		out.type = static_cast<EntryType>(tag);
 
-		if (out.chunk_size > DELTA_MAX_CHUNK_SIZE) {
-			error_ = "Delta entry declares an out-of-range chunk size: " +
-			         std::to_string(out.chunk_size);
+		if (out.references_old() && !read_varint(out.old_index, "old chunk index"))
+			return false;
+
+		if (out.type != EntryType::ORIGINAL_CHUNK) {
+			if (!read_varint(out.out_size, "chunk size"))
+				return false;
+			if (out.out_size > DELTA_MAX_CHUNK_SIZE) {
+				error_ = "Delta entry declares an out-of-range chunk size: " +
+				         std::to_string(out.out_size);
+				return false;
+			}
+		}
+
+		if (!read_exact(DELTA_DIGEST_BYTES, out.digest)) {
+			error_ = "Truncated delta: missing entry digest";
 			return false;
 		}
 		return true;
@@ -300,14 +342,13 @@ public:
 			error_ = "Truncated delta: missing trailer tag";
 			return false;
 		}
-		if (!read_exact(hash_size_, digest)) {
+		if (!read_exact(trailer_digest_size_, digest)) {
 			error_ = "Truncated delta: short trailer";
 			return false;
 		}
 		return true;
 	}
 
-	[[nodiscard]] size_t hash_size() const noexcept { return hash_size_; }
 	[[nodiscard]] const std::string& error() const noexcept { return error_; }
 
 private:
@@ -317,8 +358,32 @@ private:
 		return out.size() == count;
 	}
 
+	/// Decode a LEB128 varint, refusing an encoding wider than 64 bits so a
+	/// hostile stream cannot spin here or wrap silently.
+	bool read_varint(uint64_t& value, const char* what)
+	{
+		value = 0;
+		for (size_t i = 0; i < VARINT_MAX_BYTES; ++i) {
+			const int byte = in_.read_byte();
+			if (byte == EOF) {
+				error_ = std::string("Truncated delta: missing ") + what;
+				return false;
+			}
+			const uint64_t bits = static_cast<uint64_t>(byte) & 0x7F;
+			if (i == VARINT_MAX_BYTES - 1 && bits > 1) {
+				error_ = std::string("Malformed varint for ") + what;
+				return false;
+			}
+			value |= bits << (7 * i);
+			if ((byte & 0x80) == 0)
+				return true;
+		}
+		error_ = std::string("Malformed varint for ") + what;
+		return false;
+	}
+
 	FileIO& in_;
-	size_t hash_size_;
+	size_t trailer_digest_size_;
 	std::string error_;
 };
 

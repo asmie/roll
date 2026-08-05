@@ -30,8 +30,14 @@ struct SignedChunk {
 	size_t start_offset;				/*!< Start offset of data in file */
 	size_t chunk_size;					/*!< Size of the chunk */
 
-	bool operator==(const SignedChunk<T>& rhs) const {						// Check if two chunks are equal (don't check start offset)
-		return signature == rhs.signature && hash == rhs.hash && chunk_size == rhs.chunk_size;
+	// Chunk identity is the strong digest plus the length; start_offset is
+	// deliberately excluded so equal content at different offsets compares
+	// equal, which is what makes moved-chunk detection work. The rolling
+	// signature is excluded too: it exists to find boundaries, and a 128-bit
+	// cryptographic digest already decides identity, so including it would add
+	// nothing while forcing the wire format to carry it.
+	bool operator==(const SignedChunk<T>& rhs) const {
+		return hash == rhs.hash && chunk_size == rhs.chunk_size;
 	}
 };
 
@@ -199,8 +205,15 @@ private:
 	                size_t start_offset, U& hash_func, U* whole_hasher) {
 		SignedChunk<typename T::RollingHashType> schunk;
 		schunk.signature = signature;
-		schunk.hash.resize(hash_func.get_hash_size());
-		hash_func.hash(schunk.hash, data);
+
+		// The delta stores DELTA_DIGEST_BYTES per chunk, so identity and
+		// verification both work on that prefix; keeping the full digest in
+		// memory would let the two disagree.
+		std::vector<uint8_t> full(hash_func.get_hash_size());
+		hash_func.hash(full, data);
+		full.resize(DELTA_DIGEST_BYTES);
+		schunk.hash = std::move(full);
+
 		schunk.start_offset = start_offset;
 		schunk.chunk_size = data.size();
 		chunks.push_back(std::move(schunk));

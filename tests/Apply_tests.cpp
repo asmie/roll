@@ -21,16 +21,9 @@
 
 namespace {
 
-// Layout-derived constants so tests don't break silently if the entry
-// header or opcode encoding changes. See writeDeltaEntry / createOptimizedDiff
-// in src/Delta.hpp.
-//   header  = entry_type:u64 | signature:u64 | hash:hash_size | chunk_size:u64
-//   D-op    = 'D' | pos:u32 BE | count:u8 | count bytes
-inline size_t entry_header_size()
-{
-	return 3 * sizeof(uint64_t) + BLAKE2b().get_hash_size();
-}
-
+// Layout-derived constant so tests don't break silently if the opcode encoding
+// changes. See DeltaCodec.hpp for the authoritative layout.
+//   D-op = 'D' | pos:u32 BE | count:u8 | count bytes
 constexpr size_t d_opcode_size(size_t inline_count)
 {
 	return 1 + sizeof(uint32_t) + 1 + inline_count;
@@ -80,28 +73,60 @@ void cleanup(std::initializer_list<std::string> paths)
 		std::remove(p.c_str());
 }
 
-// Append `value` as a big-endian u64, matching the entry header encoding in
-// src/Delta.hpp.
-void push_u64_be(std::vector<uint8_t>& out, uint64_t value)
-{
-	for (int shift = 56; shift >= 0; shift -= 8)
-		out.push_back(static_cast<uint8_t>((value >> shift) & 0xFF));
-}
-
-// Hand-build a valid-looking single-entry delta whose chunk_size field is
-// `declared_size`. Used to check that readers bound the declared size *before*
-// allocating a buffer for it.
+// Hand-build a single-entry delta whose declared output size is `declared_size`,
+// so readers can be checked for bounding that field *before* allocating for it.
+// MODIFIED and ADDED both carry a size; MODIFIED also carries a source index.
 std::vector<uint8_t> crafted_delta(EntryType type, uint64_t declared_size)
 {
 	std::vector<uint8_t> raw(std::begin(DELTA_MAGIC), std::end(DELTA_MAGIC));
-	for (int shift = 24; shift >= 0; shift -= 8)
-		raw.push_back(static_cast<uint8_t>((DELTA_FORMAT_VERSION >> shift) & 0xFF));
-	push_u64_be(raw, static_cast<uint64_t>(type));
-	push_u64_be(raw, 0xDEADBEEFu);                       // signature
-	raw.insert(raw.end(), BLAKE2b().get_hash_size(), 0);  // hash
-	push_u64_be(raw, declared_size);
+	push_u32_be(raw, DELTA_FORMAT_VERSION);
+	raw.push_back(static_cast<uint8_t>(type));
+	if (type == EntryType::ORIGINAL_CHUNK || type == EntryType::MODIFIED_CHUNK)
+		push_varint(raw, 0);            // source chunk index
+	if (type != EntryType::ORIGINAL_CHUNK)
+		push_varint(raw, declared_size);
+	raw.insert(raw.end(), DELTA_DIGEST_BYTES, 0);
 	return raw;
 }
+
+// Size of a MODIFIED entry's header for given field values. Variable-length now
+// that indices and sizes are varints, so tests that truncate at a header
+// boundary must compute it rather than assume a fixed width.
+inline size_t modified_header_size(uint64_t old_index, uint64_t out_size)
+{
+	return 1 + varint_size(old_index) + varint_size(out_size) + DELTA_DIGEST_BYTES;
+}
+
+// Count entry types in a delta, so compression behaviour can be asserted on the
+// representation chosen rather than only on the total size.
+std::map<EntryType, size_t> count_entry_types(const std::string& delta_path)
+{
+	std::map<EntryType, size_t> counts;
+	FileIO in;
+	if (!in.open(delta_path, FileMode::IN)) return counts;
+
+	DeltaReader reader(in, BLAKE2b::HASH_SIZE);
+	if (!reader.read_header()) return counts;
+
+	while (reader.next_item() == DeltaReader::Item::Entry) {
+		DeltaEntryHeader header;
+		if (!reader.read_entry_header(header)) break;
+		counts[header.type]++;
+
+		if (header.type == EntryType::ADDED_CHUNK) {
+			std::vector<uint8_t> payload;
+			if (!reader.read_payload(static_cast<size_t>(header.out_size), payload))
+				break;
+		} else if (header.type == EntryType::MODIFIED_CHUNK) {
+			while (reader.at_diff_opcode()) {
+				DiffOpcode op;
+				if (!reader.read_diff_opcode(op)) return counts;
+			}
+		}
+	}
+	return counts;
+}
+
 
 bool roundtrip(const std::string& old_path, const std::string& new_path,
                const std::string& delta_path, const std::string& out_path,
@@ -400,10 +425,12 @@ TEST(Apply, truncated_modified_after_header_fails)
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
 	ASSERT_TRUE(dr.has_value());
 
-	const size_t header_size = entry_header_size();
+	// Cut to exactly the file header plus this entry's header, leaving a
+	// complete MODIFIED header with no opcodes at all.
+	const size_t header_size = DELTA_HEADER_SIZE + modified_header_size(0, data.size());
 	auto raw = read_all(DELTA);
 	ASSERT_GT(raw.size(), header_size);
-	raw.resize(header_size);  // header only, no diff opcodes
+	raw.resize(header_size);
 	write_bytes(DELTA, raw);
 
 	Apply<RKFinger, BLAKE2b> apply;
@@ -442,7 +469,8 @@ TEST(Apply, truncated_modified_at_opcode_boundary_fails)
 	ASSERT_TRUE(dr.has_value());
 
 	// Truncate after the first 'D' opcode (count=1) but before the second.
-	const size_t cut = entry_header_size() + d_opcode_size(1);
+	const size_t cut = DELTA_HEADER_SIZE + modified_header_size(0, data.size()) +
+	                   d_opcode_size(1);
 	auto raw = read_all(DELTA);
 	ASSERT_GT(raw.size(), cut);
 	raw.resize(cut);
@@ -512,41 +540,70 @@ TEST(Apply, rejects_output_aliasing_delta)
 	cleanup({OLD, NEW, DELTA});
 }
 
-TEST(Apply, duplicate_removed_entry_rejected)
+// An entry naming a source chunk the old file does not have must be refused
+// before it is used to index anything. This is the shape a delta takes when it
+// is applied against the wrong old file entirely.
+TEST(Apply, rejects_an_out_of_range_source_index)
 {
-	const std::string OLD = tpath("apply_t_dupr_old");
-	const std::string NEW = tpath("apply_t_dupr_new");
-	const std::string DELTA = tpath("apply_t_dupr_delta");
-	const std::string OUT = tpath("apply_t_dupr_out");
+	const std::string OLD = tpath("apply_t_badidx_old");
+	const std::string DELTA = tpath("apply_t_badidx_delta");
+	const std::string OUT = tpath("apply_t_badidx_out");
 
-	// Empty new + non-empty old yields an all-REMOVED delta. Each REMOVED
-	// entry's header is exactly entry_header_size() bytes, no payload. We
-	// duplicate the last entry to simulate a malformed delta that references
-	// the same old chunk twice; Apply must reject this even though the chunk
-	// content does exist in old (chunk_map.find would succeed).
-	write_random(OLD, 4096, 0xD1u);
-	write_bytes(NEW, {});
+	write_random(OLD, 2048, 0xD1u);
 
-	Signature<RKFinger, BLAKE2b> os, ns;
-	ASSERT_TRUE(os.generate_signatures(OLD));
-	ASSERT_TRUE(ns.generate_signatures(NEW));
-	Delta<RKFinger, BLAKE2b> d;
-	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
-	ASSERT_TRUE(dr.has_value());
-
-	const size_t header_size = entry_header_size();
-	constexpr size_t trailer_size = 1 + BLAKE2b::HASH_SIZE;
-	auto raw = read_all(DELTA);
-	ASSERT_GE(raw.size(), trailer_size + header_size);
-	// Duplicate the last REMOVED entry, inserted before the trailer so the
-	// parser sees it as another entry rather than skipping past EOF.
-	raw.insert(raw.end() - trailer_size,
-	           raw.end() - trailer_size - header_size, raw.end() - trailer_size);
+	// One ORIGINAL entry pointing far past the end of any plausible old file.
+	std::vector<uint8_t> raw(std::begin(DELTA_MAGIC), std::end(DELTA_MAGIC));
+	push_u32_be(raw, DELTA_FORMAT_VERSION);
+	raw.push_back(static_cast<uint8_t>(EntryType::ORIGINAL_CHUNK));
+	push_varint(raw, 1000000);
+	raw.insert(raw.end(), DELTA_DIGEST_BYTES, 0xAB);
 	write_bytes(DELTA, raw);
 
 	Apply<RKFinger, BLAKE2b> apply;
-	auto ar = apply.apply_delta(OLD, DELTA, OUT);
-	EXPECT_FALSE(ar.has_value());
+	const auto r = apply.apply_delta(OLD, DELTA, OUT);
+	ASSERT_FALSE(r.has_value());
+	EXPECT_EQ(r.error().code, DeltaErrc::corrupt_delta);
+	EXPECT_NE(r.error().message.find("references old chunk"), std::string::npos)
+		<< r.error().message;
+	EXPECT_FALSE(std::filesystem::exists(OUT));
+
+	cleanup({OLD, DELTA, OUT});
+}
+
+// Entries reference old chunks by index and never consume them, so one old chunk
+// can back many new ones. That is what makes repeated content cheap: a file made
+// of one block repeated many times costs a small entry per repeat.
+TEST(Apply, one_old_chunk_can_back_many_new_chunks)
+{
+	const std::string OLD = tpath("apply_t_reuse_old");
+	const std::string NEW = tpath("apply_t_reuse_new");
+	const std::string DELTA = tpath("apply_t_reuse_delta");
+	const std::string OUT = tpath("apply_t_reuse_out");
+
+	// Old holds one maximal chunk's worth of constant bytes; new repeats it
+	// eight times. Constant content cuts at MAX_CHUNK_SIZE, so both sides chunk
+	// predictably and every new chunk has the same content as the single old one.
+	const std::vector<uint8_t> block(DELTA_MAX_CHUNK_SIZE, 0x5A);
+	write_bytes(OLD, block);
+	std::vector<uint8_t> repeated;
+	for (int i = 0; i < 8; ++i)
+		repeated.insert(repeated.end(), block.begin(), block.end());
+	write_bytes(NEW, repeated);
+
+	std::string err;
+	ASSERT_TRUE(roundtrip(OLD, NEW, DELTA, OUT, &err)) << err;
+	EXPECT_EQ(read_all(NEW), read_all(OUT));
+
+	const auto counts = count_entry_types(DELTA);
+	EXPECT_EQ(counts.count(EntryType::ADDED_CHUNK), 0u)
+		<< "content already present in the old file must not be re-sent";
+	EXPECT_GE(counts.at(EntryType::ORIGINAL_CHUNK), 8u);
+
+	// Eight references to a 16 KiB block should cost a few hundred bytes, not
+	// the 128 KiB the file occupies.
+	EXPECT_LT(read_all(DELTA).size(), 1024u)
+		<< "delta was " << read_all(DELTA).size() << " bytes for a "
+		<< repeated.size() << " byte file of repeated content";
 
 	cleanup({OLD, NEW, DELTA, OUT});
 }
@@ -943,39 +1000,6 @@ TEST(Apply, success_carries_statistics)
 	cleanup({OLD, NEW, DELTA, OUT});
 }
 
-namespace {
-
-// Count entry types in a delta, so compression behaviour can be asserted on the
-// representation chosen rather than only on the total size.
-std::map<EntryType, size_t> count_entry_types(const std::string& delta_path)
-{
-	std::map<EntryType, size_t> counts;
-	FileIO in;
-	if (!in.open(delta_path, FileMode::IN)) return counts;
-
-	DeltaReader reader(in, BLAKE2b::HASH_SIZE);
-	if (!reader.read_header()) return counts;
-
-	while (reader.next_item() == DeltaReader::Item::Entry) {
-		DeltaEntryHeader header;
-		if (!reader.read_entry_header(header)) break;
-		counts[header.type]++;
-
-		if (header.type == EntryType::ADDED_CHUNK) {
-			std::vector<uint8_t> payload;
-			if (!reader.read_payload(static_cast<size_t>(header.chunk_size), payload))
-				break;
-		} else if (header.type == EntryType::MODIFIED_CHUNK) {
-			while (reader.at_diff_opcode()) {
-				DiffOpcode op;
-				if (!reader.read_diff_opcode(op)) return counts;
-			}
-		}
-	}
-	return counts;
-}
-
-} // namespace
 
 // A chunk peppered with edits encodes larger as a diff than as the literal
 // bytes. Emitting the diff anyway let a delta exceed the size of the file it
@@ -1004,9 +1028,9 @@ TEST(Apply, dense_edits_are_stored_as_a_literal_not_a_diff)
 		<< "a diff costlier than the literal must not be emitted";
 	EXPECT_GT(counts.at(EntryType::ADDED_CHUNK), 0u);
 
-	// And the delta must stay within the literal plus a bounded header overhead.
-	const size_t overhead = 4 * delta_entry_header_size(BLAKE2b::HASH_SIZE) +
-	                        DELTA_HEADER_SIZE + 1 + BLAKE2b::HASH_SIZE;
+	// And the delta must stay within the literal plus bounded metadata.
+	const size_t max_entry = 1 + VARINT_MAX_BYTES + DELTA_DIGEST_BYTES;
+	const size_t overhead = 4 * max_entry + DELTA_HEADER_SIZE + 1 + BLAKE2b::HASH_SIZE;
 	EXPECT_LE(read_all(DELTA).size(), data.size() + overhead);
 
 	cleanup({OLD, NEW, DELTA, OUT});

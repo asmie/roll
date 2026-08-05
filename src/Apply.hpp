@@ -1,7 +1,6 @@
 #ifndef APPLY_HPP
 #define APPLY_HPP
 
-#include "ChunkIndex.hpp"
 #include "Delta.hpp"
 #include "DeltaCodec.hpp"
 #include "DeltaError.hpp"
@@ -22,14 +21,16 @@
 * Class for applying a delta produced by Delta<T,U> against an old file to
 * reconstruct the new file.
 *
-* Format contract assumed by this applier (must stay in sync with Delta<T,U>):
-*  - Entries appear in target (new-file) chunk-position order. REMOVED entries
-*    (which produce no output) appear after all non-REMOVED entries.
-*  - For a MODIFIED entry at the i-th non-REMOVED position, the source old
-*    chunk is old_chunks[i] (the same-position chunk in the regenerated old
-*    signature). There is no source-anchor field on MODIFIED entries; if Delta
-*    ever pairs MODIFIED with a different old chunk, this applier will need a
-*    format change to follow.
+* Every entry produces one chunk of output, in order, and names its source in
+* the old file by index — so this applier just follows the stream and never has
+* to work out which old chunk an entry meant. The previous format left MODIFIED
+* entries anchored positionally, which coupled the two sides and was noted here
+* as needing a format change to fix; that coupling is gone.
+*
+* What the applier still owes the caller: the old file it re-chunks must be the
+* one the delta was built against. A per-entry digest catches a changed old file
+* at the entry that first diverges, and the trailer digest catches anything the
+* per-entry checks could miss across the whole reconstruction.
 */
 template<RollingHashAlgorithm T, StrongHashAlgorithm U>
 class Apply {
@@ -124,13 +125,8 @@ private:
 			                                 "Failed to read old file: " + old_file_path.string()});
 		const auto& old_chunks = old_sig.get_chunks();
 
-		ChunkIndex<typename T::RollingHashType> chunk_index(old_chunks);
-		std::vector<bool> original_used(old_chunks.size(), false);
-
 		U hash_func;
-		const size_t hash_size = hash_func.get_hash_size();
-		size_t new_idx = 0;
-		bool seen_removed = false;
+		const size_t trailer_size = hash_func.get_hash_size();
 
 		U whole_file_hash;
 		whole_file_hash.init();
@@ -145,7 +141,7 @@ private:
 				if (!reader.read_trailer(trailer)) {
 					return std::unexpected(DeltaError{DeltaErrc::corrupt_delta, reader.error()});
 				}
-				std::vector<uint8_t> computed(hash_size);
+				std::vector<uint8_t> computed(trailer_size);
 				whole_file_hash.finalize(computed);
 				if (computed != trailer) {
 					return std::unexpected(DeltaError{DeltaErrc::integrity_mismatch,
@@ -160,123 +156,78 @@ private:
 				return std::unexpected(DeltaError{DeltaErrc::corrupt_delta, reader.error()});
 			}
 
-			const auto entry_type = header.type;
-			const uint64_t signature = header.signature;
-			const uint64_t chunk_size = header.chunk_size;
-			auto hash_buf = std::move(header.hash);
-			if (seen_removed && entry_type != EntryType::REMOVED_CHUNK) {
-				return std::unexpected(DeltaError{DeltaErrc::corrupt_delta,
-				                                    "Non-REMOVED entry after REMOVED"});
+			// Resolve the referenced old chunk once, for both entry kinds that
+			// have one. An index past the end means the delta does not match this
+			// old file — most often because the old file changed since the delta
+			// was made.
+			const SignedChunk<typename T::RollingHashType>* source = nullptr;
+			if (header.references_old()) {
+				if (header.old_index >= old_chunks.size()) {
+					return std::unexpected(DeltaError{DeltaErrc::corrupt_delta,
+					                                    "Entry references old chunk " +
+					                                    std::to_string(header.old_index) +
+					                                    ", but the old file has " +
+					                                    std::to_string(old_chunks.size())});
+				}
+				source = &old_chunks[static_cast<size_t>(header.old_index)];
 			}
 
-			switch (entry_type) {
+			std::vector<uint8_t> produced;
+
+			switch (header.type) {
 				case EntryType::ORIGINAL_CHUNK: {
-					SignedChunk<typename T::RollingHashType> probe;
-					probe.signature = signature;
-					probe.hash = std::move(hash_buf);
-					probe.chunk_size = chunk_size;
-					probe.start_offset = 0;
-
-					size_t k;
-					if (!chunk_index.find_unused(original_used, probe, k)) {
-						return std::unexpected(DeltaError{DeltaErrc::corrupt_delta,
-						                                    "ORIGINAL entry references unknown chunk"});
+					// The recorded digest is the old chunk's own, so comparing it
+					// against the regenerated signature detects a changed old file
+					// without re-hashing the bytes.
+					if (source->hash != header.digest) {
+						return std::unexpected(DeltaError{DeltaErrc::integrity_mismatch,
+						                                    "ORIGINAL entry digest does not match the old chunk"});
 					}
-
-					auto data = old_file.read_chunk(old_chunks[k].chunk_size,
-					                                old_chunks[k].start_offset);
-					if (data.size() != old_chunks[k].chunk_size) {
+					produced = old_file.read_chunk(source->chunk_size, source->start_offset);
+					if (produced.size() != source->chunk_size) {
 						return std::unexpected(DeltaError{DeltaErrc::io_error,
 						                                    "Failed to read old chunk"});
 					}
-					if (!output.write_chunk(data)) {
-						return std::unexpected(DeltaError{DeltaErrc::io_error,
-						                                    "Failed to write output chunk"});
-					}
-					whole_file_hash.update(data);
-					original_used[k] = true;
-					stats.bytes_written += data.size();
-					new_idx++;
 					break;
 				}
 
 				case EntryType::ADDED_CHUNK: {
-					std::vector<uint8_t> payload;
-					if (!reader.read_payload(chunk_size, payload)) {
+					if (!reader.read_payload(static_cast<size_t>(header.out_size), produced)) {
 						return std::unexpected(DeltaError{DeltaErrc::corrupt_delta,
 						                                    "Truncated delta: short ADDED payload"});
 					}
-					if (!verifyHash(hash_func, hash_size, payload, hash_buf)) {
+					if (!verifyDigest(hash_func, produced, header.digest)) {
 						return std::unexpected(DeltaError{DeltaErrc::integrity_mismatch,
 						                                    "ADDED entry hash mismatch"});
 					}
-					if (!output.write_chunk(payload)) {
-						return std::unexpected(DeltaError{DeltaErrc::io_error,
-						                                    "Failed to write output chunk"});
-					}
-					whole_file_hash.update(payload);
-					stats.bytes_written += payload.size();
-					new_idx++;
 					break;
 				}
 
 				case EntryType::MODIFIED_CHUNK: {
-					if (new_idx >= old_chunks.size()) {
-						return std::unexpected(DeltaError{DeltaErrc::corrupt_delta,
-						                                    "MODIFIED entry has no source old chunk"});
-					}
-					const auto& src = old_chunks[new_idx];
-					auto old_data = old_file.read_chunk(src.chunk_size, src.start_offset);
-					if (old_data.size() != src.chunk_size) {
+					auto old_data = old_file.read_chunk(source->chunk_size, source->start_offset);
+					if (old_data.size() != source->chunk_size) {
 						return std::unexpected(DeltaError{DeltaErrc::io_error,
 						                                    "Failed to read MODIFIED source chunk"});
 					}
 
-					std::vector<uint8_t> reconstructed;
 					DeltaError diff_error;
-					if (!applyDiff(reader, old_data, chunk_size, reconstructed, diff_error))
+					if (!applyDiff(reader, old_data, header.out_size, produced, diff_error))
 						return std::unexpected(std::move(diff_error));
 
-					if (!verifyHash(hash_func, hash_size, reconstructed, hash_buf)) {
+					if (!verifyDigest(hash_func, produced, header.digest)) {
 						return std::unexpected(DeltaError{DeltaErrc::integrity_mismatch,
 						                                    "MODIFIED entry hash mismatch"});
 					}
-					if (!output.write_chunk(reconstructed)) {
-						return std::unexpected(DeltaError{DeltaErrc::io_error,
-						                                    "Failed to write output chunk"});
-					}
-					whole_file_hash.update(reconstructed);
-					original_used[new_idx] = true;
-					stats.bytes_written += reconstructed.size();
-					new_idx++;
 					break;
 				}
-
-				case EntryType::REMOVED_CHUNK: {
-					// REMOVED entries produce no output and don't advance new_idx,
-					// but each must consume a distinct unused old chunk so that
-					// duplicate or extraneous REMOVEDs are rejected.
-					SignedChunk<typename T::RollingHashType> probe;
-					probe.signature = signature;
-					probe.hash = std::move(hash_buf);
-					probe.chunk_size = chunk_size;
-					probe.start_offset = 0;
-
-					size_t k;
-					if (!chunk_index.find_unused(original_used, probe, k)) {
-						return std::unexpected(DeltaError{DeltaErrc::corrupt_delta,
-						                                    "REMOVED entry references unknown or already-consumed old chunk"});
-					}
-					original_used[k] = true;
-					seen_removed = true;
-					break;
-				}
-
-				default:
-					return std::unexpected(DeltaError{DeltaErrc::corrupt_delta,
-					                                    "Unknown entry type in delta"});
 			}
 
+			if (!output.write_chunk(produced)) {
+				return std::unexpected(DeltaError{DeltaErrc::io_error,
+				                                    "Failed to write output chunk"});
+			}
+			whole_file_hash.update(produced);
+			stats.bytes_written += produced.size();
 			stats.entries_processed++;
 		}
 
@@ -295,12 +246,13 @@ private:
 		return stats;
 	}
 
-	bool verifyHash(U& hash_func, size_t hash_size,
-	                std::span<const uint8_t> chunk_data,
-	                const std::vector<uint8_t>& expected) {
-		if (expected.size() != hash_size) return false;
-		std::vector<uint8_t> computed(hash_size);
-		hash_func.hash(computed, chunk_data);
+	/// Hash `data` and compare against a DELTA_DIGEST_BYTES-truncated digest.
+	bool verifyDigest(U& hash_func, std::span<const uint8_t> data,
+	                  const std::vector<uint8_t>& expected) {
+		if (expected.size() != DELTA_DIGEST_BYTES) return false;
+		std::vector<uint8_t> computed(hash_func.get_hash_size());
+		hash_func.hash(computed, data);
+		computed.resize(DELTA_DIGEST_BYTES);
 		return computed == expected;
 	}
 

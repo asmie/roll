@@ -1,6 +1,7 @@
 #include "gtest/gtest.h"
 
 #include "ChunkIndex.hpp"
+#include "DeltaFormat.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -15,7 +16,7 @@ Chunk make_chunk(uint64_t signature, uint8_t hash_seed, size_t size, size_t offs
 {
 	Chunk c;
 	c.signature = signature;
-	c.hash.assign(64, hash_seed);
+	c.hash.assign(DELTA_DIGEST_BYTES, hash_seed);
 	c.chunk_size = size;
 	c.start_offset = offset;
 	return c;
@@ -52,7 +53,7 @@ TEST(ChunkIndex, matches_identical_content_at_a_different_offset)
 	EXPECT_EQ(position, 0u);
 }
 
-TEST(ChunkIndex, rejects_content_differing_in_hash_or_size)
+TEST(ChunkIndex, rejects_content_differing_in_digest_or_size)
 {
 	std::vector<Chunk> chunks{ make_chunk(11, 0xA1, 512, 0) };
 	Index index(chunks);
@@ -60,11 +61,29 @@ TEST(ChunkIndex, rejects_content_differing_in_hash_or_size)
 	size_t position = 999;
 
 	EXPECT_FALSE(index.find_unused(used, make_chunk(11, 0xFF, 512, 0), position))
-		<< "differing strong hash must not match";
+		<< "differing strong digest must not match";
 	EXPECT_FALSE(index.find_unused(used, make_chunk(11, 0xA1, 256, 0), position))
 		<< "differing chunk size must not match";
-	EXPECT_FALSE(index.find_unused(used, make_chunk(99, 0xA1, 512, 0), position))
-		<< "differing rolling signature must not match";
+}
+
+// Identity is the strong digest plus the length. The rolling signature exists to
+// find boundaries, so two chunks agreeing on digest and size are the same
+// content whatever their fingerprints say — which is what lets the wire format
+// omit the signature entirely.
+TEST(ChunkIndex, identity_ignores_the_rolling_signature)
+{
+	const Chunk indexed = make_chunk(11, 0xA1, 512, 0);
+	Chunk probe = make_chunk(99, 0xA1, 512, 4096);  // same digest and size
+
+	EXPECT_TRUE(indexed == probe);
+
+	std::vector<Chunk> chunks{ indexed };
+	Index index(chunks);
+	std::vector<bool> used(chunks.size(), false);
+
+	size_t position = 999;
+	ASSERT_TRUE(index.find_unused(used, probe, position));
+	EXPECT_EQ(position, 0u);
 }
 
 // Every copy of a repeated content must be consumable, one at a time, each

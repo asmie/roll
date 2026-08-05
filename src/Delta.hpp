@@ -19,19 +19,10 @@
 #include <vector>
 
 /**
-* Structure representing single delta record.
-*/
-template <class T>
-struct DeltaEntry {
-    EntryType type;									/*!< Entry type (original, added etc) */
-    SignedChunk<T> chunk_data;						/*!< Signed chunk structure connected to the delta */
-    std::vector<uint8_t> chunk_data_raw;			/*!< Raw chunk data (only for added and modified) */
-};
-
-/**
 * Generates a binary delta between two file signatures by emitting one entry
-* per chunk of the new file (followed by REMOVED entries for old chunks not
-* referenced from the new file).
+* per chunk of the new file. Entries reference old chunks by index, so an old
+* chunk may back any number of new ones and unreferenced old chunks need no
+* mention at all.
 */
 template<RollingHashAlgorithm T, StrongHashAlgorithm U>
 class Delta {
@@ -151,56 +142,50 @@ private:
     }
 
     /**
-    * Emit delta entries in target (new-file) order, followed by REMOVED entries
-    * for any unmatched old chunks. This ordering lets the applier append each
-    * entry directly to the output without reordering.
+    * Emit one entry per chunk of the new file, in order, so the applier can
+    * append each entry's output without reordering.
+    *
+    * Entries name their source chunk in the old file by index. That lets one old
+    * chunk back any number of new chunks — repeated content costs a ~19-byte
+    * reference per occurrence instead of a full copy after the first — and it
+    * removes the consumption bookkeeping the previous format needed, along with
+    * the REMOVED entries whose only job was to let the applier check it. Old
+    * chunks that nothing references are simply never mentioned.
     */
     bool processMultipleChunks(const std::vector<SignedChunk<typename T::RollingHashType>>& original_chunks,
                                const std::vector<SignedChunk<typename T::RollingHashType>>& new_chunks,
                                ChunkIndex<typename T::RollingHashType>& chunk_index,
                                FileIO& old, FileIO& file, DeltaWriter& writer, Progress& progress) {
-        std::vector<bool> original_used(original_chunks.size(), false);
-
-        // Hoisted: the digest length is a constant of U, and constructing U
-        // inside the loop meant creating and destroying a hash context (an
-        // OpenSSL EVP allocation for BLAKE2b) once per modified chunk just to
-        // read that constant.
-        const size_t entry_header_cost = delta_entry_header_size(U{}.get_hash_size());
+        // No chunk is ever consumed now, so nothing is ever marked used; the
+        // index still wants the flags, and an all-false view means every
+        // position stays available for reuse.
+        const std::vector<bool> none_used(original_chunks.size(), false);
 
         for (size_t i = 0; i < new_chunks.size(); ++i) {
-            DeltaEntry<typename T::RollingHashType> entry;
+            // Reuse verbatim: prefer the same position, since a same-position
+            // match keeps the source of a later MODIFIED entry nearby and costs
+            // the smallest index varint.
+            size_t source = 0;
+            bool reusable = false;
+            if (i < original_chunks.size() && original_chunks[i] == new_chunks[i]) {
+                source = i;
+                reusable = true;
+            } else if (chunk_index.find_unused(none_used, new_chunks[i], source)) {
+                reusable = true;
+            }
 
-            // Identical chunk at same position.
-            if (i < original_chunks.size() && !original_used[i] &&
-                original_chunks[i] == new_chunks[i]) {
-                entry.type = EntryType::ORIGINAL_CHUNK;
-                entry.chunk_data = original_chunks[i];
-                original_used[i] = true;
-                if (!writeDeltaEntry(writer, entry, progress)) return false;
+            if (reusable) {
+                if (!writer.write_original(source, new_chunks[i].hash)) {
+                    progress.error = DeltaError{DeltaErrc::io_error, writer.error()};
+                    return false;
+                }
                 progress.chunks_processed++;
                 continue;
             }
 
-            // Moved match: identical content located elsewhere in old. The
-            // index tracks every position a content occupies, so repeated
-            // content is reused copy by copy instead of being re-sent, and a
-            // consumed copy costs O(1) to step past rather than a scan.
-            size_t moved_index = 0;
-            if (chunk_index.find_unused(original_used, new_chunks[i], moved_index)) {
-                entry.type = EntryType::ORIGINAL_CHUNK;
-                entry.chunk_data = new_chunks[i];
-                original_used[moved_index] = true;
-                if (!writeDeltaEntry(writer, entry, progress)) return false;
-                progress.chunks_processed++;
-                continue;
-            }
-
-            // Modification of the same-position old chunk, otherwise an addition.
-            bool is_modification = false;
-            if (i < original_chunks.size() && !original_used[i]) {
-                entry.type = EntryType::MODIFIED_CHUNK;
-                entry.chunk_data = new_chunks[i];
-
+            // Otherwise rebuild from the same-position old chunk if a diff pays
+            // for itself, and fall back to shipping the bytes.
+            if (i < original_chunks.size()) {
                 auto old_data = old.read_chunk(original_chunks[i].chunk_size,
                                               original_chunks[i].start_offset);
                 auto new_data = file.read_chunk(new_chunks[i].chunk_size,
@@ -209,43 +194,30 @@ private:
                 if (!old_data.empty() && !new_data.empty()) {
                     auto diff = createDiff(old_data, new_data);
 
-                    // Only keep the diff when it actually costs less than
-                    // storing the chunk outright. Declining the diff also
-                    // leaves the old chunk unconsumed, which costs one REMOVED
-                    // entry, so the break-even point includes that header — not
-                    // just the chunk length. Without this an in-place edit
-                    // scattered through a chunk could encode larger than the
-                    // bytes it describes, and the delta could exceed the file.
-                    const size_t literal_cost = new_chunks[i].chunk_size + entry_header_cost;
-                    if (diff.size() <= literal_cost) {
-                        entry.chunk_data_raw = std::move(diff);
-                        is_modification = true;
-                        original_used[i] = true;
+                    // Keep the diff only when it costs less than the literal
+                    // bytes. Both representations pay a comparable header, so
+                    // the comparison is against the chunk length itself; without
+                    // this an edit scattered through a chunk could encode larger
+                    // than the bytes it describes.
+                    if (diff.size() < new_chunks[i].chunk_size) {
+                        if (!writer.write_modified(i, new_chunks[i].chunk_size,
+                                                   new_chunks[i].hash, diff)) {
+                            progress.error = DeltaError{DeltaErrc::io_error, writer.error()};
+                            return false;
+                        }
+                        progress.chunks_processed++;
+                        continue;
                     }
                 }
             }
 
-            if (!is_modification) {
-                entry.type = EntryType::ADDED_CHUNK;
-                entry.chunk_data = new_chunks[i];
-
-                entry.chunk_data_raw = file.read_chunk(entry.chunk_data.chunk_size,
-                                                       entry.chunk_data.start_offset);
+            const auto payload = file.read_chunk(new_chunks[i].chunk_size,
+                                                 new_chunks[i].start_offset);
+            if (!writer.write_added(new_chunks[i].hash, payload)) {
+                progress.error = DeltaError{DeltaErrc::io_error, writer.error()};
+                return false;
             }
-
-            if (!writeDeltaEntry(writer, entry, progress)) return false;
             progress.chunks_processed++;
-        }
-
-        // Removed chunks: any old chunk not consumed above.
-        for (size_t i = 0; i < original_chunks.size(); ++i) {
-            if (!original_used[i]) {
-                DeltaEntry<typename T::RollingHashType> entry;
-                entry.type = EntryType::REMOVED_CHUNK;
-                entry.chunk_data = original_chunks[i];
-                if (!writeDeltaEntry(writer, entry, progress)) return false;
-                progress.chunks_processed++;
-            }
         }
         return true;
     }
@@ -501,25 +473,6 @@ private:
     std::vector<int> myers_v_;
     std::vector<int> myers_trace_;
 
-    /**
-    * Write one delta entry. The byte layout lives in DeltaCodec.
-    */
-    bool writeDeltaEntry(DeltaWriter& writer, const DeltaEntry<typename T::RollingHashType>& entry,
-                        Progress& progress) {
-        const bool has_payload = entry.type == EntryType::ADDED_CHUNK ||
-                                 entry.type == EntryType::MODIFIED_CHUNK;
-        const auto payload = has_payload
-            ? std::span<const uint8_t>{entry.chunk_data_raw}
-            : std::span<const uint8_t>{};
-
-        if (!writer.write_entry(entry.type, entry.chunk_data.signature,
-                                entry.chunk_data.hash, entry.chunk_data.chunk_size,
-                                payload)) {
-            progress.error = DeltaError{DeltaErrc::io_error, writer.error()};
-            return false;
-        }
-        return true;
-    }
 };
 
 #endif // DELTA_HPP
