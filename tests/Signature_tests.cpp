@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <span>
 #include <vector>
 #include "gtest/gtest.h"
 
@@ -237,4 +238,66 @@ TEST(Signature, constant_content_cuts_at_max_chunk_size)
 
 		std::filesystem::remove(path);
 	}
+}
+
+// WholeFileHash::Compute digests the input as a side effect of chunking. The
+// digest must equal an independent one-shot hash of the file — the emitted
+// chunks contiguously cover the input, which is the property this relies on.
+TEST(Signature, whole_file_hash_matches_a_one_shot_of_the_file)
+{
+	const auto path = std::filesystem::temp_directory_path() / "sig_whole_hash";
+	std::mt19937 rng(0xF00Du);
+	std::vector<uint8_t> data(100 * 1024);
+	for (auto& b : data)
+		b = static_cast<uint8_t>(rng());
+	write_tmp(path, data);
+
+	Signature<RKFinger, BLAKE2b> sig;
+	ASSERT_TRUE(sig.generate_signatures(path, WholeFileHash::Compute));
+	ASSERT_GT(sig.get_chunks().size(), 1u) << "input should span several chunks";
+
+	BLAKE2b one_shot;
+	std::vector<uint8_t> expected(one_shot.get_hash_size());
+	one_shot.hash(expected, data);
+
+	EXPECT_EQ(sig.whole_file_hash(), expected);
+
+	std::filesystem::remove(path);
+}
+
+TEST(Signature, whole_file_hash_is_empty_unless_requested)
+{
+	const auto path = std::filesystem::temp_directory_path() / "sig_whole_skip";
+	write_tmp(path, std::vector<uint8_t>(2048, 0x42));
+
+	Signature<RKFinger, BLAKE2b> sig;
+	ASSERT_TRUE(sig.generate_signatures(path));
+	EXPECT_TRUE(sig.whole_file_hash().empty());
+
+	// A later Compute run fills it; a following Skip run clears it again, so a
+	// stale digest can never be attributed to the wrong input.
+	ASSERT_TRUE(sig.generate_signatures(path, WholeFileHash::Compute));
+	EXPECT_FALSE(sig.whole_file_hash().empty());
+	ASSERT_TRUE(sig.generate_signatures(path));
+	EXPECT_TRUE(sig.whole_file_hash().empty());
+
+	std::filesystem::remove(path);
+}
+
+TEST(Signature, whole_file_hash_of_an_empty_file_is_the_empty_digest)
+{
+	const auto path = std::filesystem::temp_directory_path() / "sig_whole_empty";
+	write_tmp(path, {});
+
+	Signature<RKFinger, BLAKE2b> sig;
+	ASSERT_TRUE(sig.generate_signatures(path, WholeFileHash::Compute));
+	ASSERT_EQ(sig.get_chunks().size(), 0u);
+
+	BLAKE2b one_shot;
+	std::vector<uint8_t> expected(one_shot.get_hash_size());
+	one_shot.hash(expected, std::span<const uint8_t>{});
+
+	EXPECT_EQ(sig.whole_file_hash(), expected);
+
+	std::filesystem::remove(path);
 }

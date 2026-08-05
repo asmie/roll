@@ -24,6 +24,7 @@
 #cmakedefine RH_HAVE_FILESYSTEM
 #cmakedefine RH_HAVE_FSTREAM
 #cmakedefine RH_HAVE_FUNCTIONAL
+#cmakedefine RH_HAVE_FUTURE
 #cmakedefine RH_HAVE_IOMANIP
 #cmakedefine RH_HAVE_IOSTREAM
 #cmakedefine RH_HAVE_LIMITS

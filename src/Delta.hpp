@@ -70,7 +70,7 @@ public:
                                         old, file, writer, progress);
 
         if (ok)
-            ok = writeTrailer(file, writer, progress);
+            ok = writeTrailer(file, writer, progress, newfile.whole_file_hash());
 
         // Reads need no flush, so only the delta's close can fail meaningfully.
         (void) old.close();
@@ -94,22 +94,30 @@ private:
         DeltaError error;
     };
 
-    // Stream-hash the entire new-file content in fixed-size buffers and emit
-    // (DELTA_TRAILER_TAG | hash) so the applier can verify end-to-end
-    // reconstruction, not just per-chunk hashes.
-    bool writeTrailer(FileIO& file, DeltaWriter& writer, Progress& progress) {
-        U hash_func;
-        hash_func.init();
+    // Emit (DELTA_TRAILER_TAG | hash) so the applier can verify end-to-end
+    // reconstruction, not just per-chunk hashes. When the new file's Signature
+    // was generated with WholeFileHash::Compute its digest is reused; otherwise
+    // the file is stream-hashed here, which costs a full second read of it.
+    bool writeTrailer(FileIO& file, DeltaWriter& writer, Progress& progress,
+                      std::span<const uint8_t> precomputed) {
+        std::vector<uint8_t> digest;
 
-        constexpr size_t STREAM_CHUNK = 64 * 1024;
-        auto buf = file.read_chunk(STREAM_CHUNK, 0);
-        while (!buf.empty()) {
-            hash_func.update(buf);
-            buf = file.read_chunk(STREAM_CHUNK);
+        if (!precomputed.empty()) {
+            digest.assign(precomputed.begin(), precomputed.end());
+        } else {
+            U hash_func;
+            hash_func.init();
+
+            constexpr size_t STREAM_CHUNK = 64 * 1024;
+            auto buf = file.read_chunk(STREAM_CHUNK, 0);
+            while (!buf.empty()) {
+                hash_func.update(buf);
+                buf = file.read_chunk(STREAM_CHUNK);
+            }
+
+            digest.resize(hash_func.get_hash_size());
+            hash_func.finalize(digest);
         }
-
-        std::vector<uint8_t> digest(hash_func.get_hash_size());
-        hash_func.finalize(digest);
 
         if (!writer.write_trailer(digest)) {
             progress.error = DeltaError{DeltaErrc::io_error, writer.error()};

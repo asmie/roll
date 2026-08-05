@@ -1086,3 +1086,36 @@ TEST(Apply, unrelated_content_becomes_a_bounded_literal)
 
 	cleanup({OLD, NEW, DELTA, OUT});
 }
+
+// The trailer digest can come from the new file's signature pass
+// (WholeFileHash::Compute) instead of a second read in generate_delta. Both
+// routes hash the same bytes, so the deltas must be identical to the byte.
+TEST(Apply, precomputed_trailer_digest_matches_the_reread_path)
+{
+	const std::string OLD = tpath("apply_t_pretrail_old");
+	const std::string NEW = tpath("apply_t_pretrail_new");
+	const std::string DELTA_A = tpath("apply_t_pretrail_delta_a");
+	const std::string DELTA_B = tpath("apply_t_pretrail_delta_b");
+	const std::string OUT = tpath("apply_t_pretrail_out");
+
+	write_random(OLD, 24 * 1024, 0x7001u);
+	write_random(NEW, 24 * 1024, 0x7002u);
+
+	Signature<RKFinger, BLAKE2b> old_sig, new_plain, new_hashed;
+	ASSERT_TRUE(old_sig.generate_signatures(OLD));
+	ASSERT_TRUE(new_plain.generate_signatures(NEW));
+	ASSERT_TRUE(new_hashed.generate_signatures(NEW, WholeFileHash::Compute));
+
+	Delta<RKFinger, BLAKE2b> d;
+	ASSERT_TRUE(d.generate_delta(old_sig, new_plain, OLD, NEW, DELTA_A).has_value());
+	ASSERT_TRUE(d.generate_delta(old_sig, new_hashed, OLD, NEW, DELTA_B).has_value());
+
+	EXPECT_EQ(read_all(DELTA_A), read_all(DELTA_B))
+		<< "precomputed and re-read trailer digests must produce identical deltas";
+
+	Apply<RKFinger, BLAKE2b> apply;
+	ASSERT_TRUE(apply.apply_delta(OLD, DELTA_B, OUT).has_value());
+	EXPECT_EQ(read_all(NEW), read_all(OUT));
+
+	cleanup({OLD, NEW, DELTA_A, DELTA_B, OUT});
+}

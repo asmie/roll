@@ -51,7 +51,7 @@ include(CheckCXXSourceCompiles)
 # Headers used by the production sources.
 foreach(_h
         algorithm atomic bit cctype climits concepts cstddef cstdint cstdio
-        cstdlib cstring expected filesystem fstream functional iomanip iostream
+        cstdlib cstring expected filesystem fstream functional future iomanip iostream
         limits span sstream stdexcept string string_view system_error type_traits
         unordered_map utility vector)
     string(TOUPPER "${_h}" _H)

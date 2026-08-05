@@ -1,4 +1,5 @@
 #include <exception>
+#include <future>
 #include <iostream>
 #include <string_view>
 
@@ -57,11 +58,22 @@ int run_create(const char* old_path, const char* new_path, const char* delta_pat
 	Signature<RKFinger, BLAKE2b> old_signature;
 	Signature<RKFinger, BLAKE2b> new_signature;
 
-	if (!old_signature.generate_signatures(old_path)) {
+	// The two signature passes read different files and share no state, so run
+	// the old file's on a worker thread while this thread handles the new
+	// file's. The new file's pass also computes the whole-file trailer digest,
+	// which would otherwise cost generate_delta a second full read of it.
+	auto old_ok = std::async(std::launch::async, [&old_signature, old_path] {
+		return old_signature.generate_signatures(old_path);
+	});
+	const bool new_ok = new_signature.generate_signatures(new_path, WholeFileHash::Compute);
+
+	// Join the worker before acting on either result; get() also rethrows any
+	// exception from the worker on this thread, where main()'s handler sees it.
+	if (!old_ok.get()) {
 		std::cerr << "Failed to read old file: " << old_path << std::endl;
 		return 1;
 	}
-	if (!new_signature.generate_signatures(new_path)) {
+	if (!new_ok) {
 		std::cerr << "Failed to read new file: " << new_path << std::endl;
 		return 1;
 	}

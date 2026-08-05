@@ -5,9 +5,20 @@
 #include "FileIO.hpp"
 #include "HashConcepts.hpp"
 
-#include <filesystem>
-#include <vector>
 #include <concepts>
+#include <filesystem>
+#include <span>
+#include <vector>
+
+/// Whether generate_signatures should additionally hash the entire input.
+enum class WholeFileHash {
+	Skip,     ///< Chunk signatures only (default).
+	Compute,  ///< Also produce a digest of the whole file, available from
+	          ///< whole_file_hash(). Costs one extra hash pass over data that
+	          ///< is already being read, not a second read of the file — the
+	          ///< emitted chunks contiguously cover the input, so feeding each
+	          ///< one to a second hasher digests the file as a side effect.
+};
 
 /**
 * Structure representing signed chunk of data.
@@ -42,13 +53,15 @@ public:
 	* @return False if the path could not be opened, true otherwise (chunks may
 	*         still be empty for a zero-byte file).
 	*/
-	[[nodiscard]] bool generate_signatures(const std::filesystem::path& datafile) {
+	[[nodiscard]] bool generate_signatures(const std::filesystem::path& datafile,
+	                                       WholeFileHash mode = WholeFileHash::Skip) {
 		FileIO file;
 		if (!file.open(datafile, FileMode::IN)) {
 			chunks.clear();
+			whole_hash_.clear();
 			return false;
 		}
-		return generate_signatures(file);
+		return generate_signatures(file, mode);
 	}
 
 	/**
@@ -57,8 +70,10 @@ public:
 	* not closed by this call.
 	* @return False if `file` is not open, true otherwise.
 	*/
-	[[nodiscard]] bool generate_signatures(FileIO& file) {
+	[[nodiscard]] bool generate_signatures(FileIO& file,
+	                                       WholeFileHash mode = WholeFileHash::Skip) {
 		chunks.clear();
+		whole_hash_.clear();
 
 		if (!file.is_open())
 			return false;
@@ -67,9 +82,25 @@ public:
 		U hash_func;
 		size_t bytes_read = 0;
 
+		U whole_hasher;
+		U* whole = nullptr;
+		if (mode == WholeFileHash::Compute) {
+			whole_hasher.init();
+			whole = &whole_hasher;
+		}
+		// Every successful return must run this, including the empty-file one:
+		// the digest of an empty input is still a defined value.
+		const auto finish = [&]() -> bool {
+			if (whole) {
+				whole_hash_.resize(whole->get_hash_size());
+				whole->finalize(whole_hash_);
+			}
+			return true;
+		};
+
 		auto initial = file.read_chunk(fingerprint.get_window_size(), 0);
 		if (initial.empty())
-			return true;  // empty file -> open succeeded, no chunks to emit
+			return finish();  // empty file -> open succeeded, no chunks to emit
 
 		bool full_window = fingerprint.initialize(initial);
 		bytes_read += initial.size();
@@ -80,8 +111,8 @@ public:
 		// File smaller than one window: emit the polynomial-hash signature
 		// computed by initialize() and bail — there is nothing to roll.
 		if (!full_window) {
-			emit_chunk(chunk, current_fingerprint, bytes_read - chunk.size(), hash_func);
-			return true;
+			emit_chunk(chunk, current_fingerprint, bytes_read - chunk.size(), hash_func, whole);
+			return finish();
 		}
 
 		bool init = false;
@@ -134,15 +165,15 @@ public:
 
 			if (boundary_found)					// chunk boundary found
 			{
-				emit_chunk(chunk, current_fingerprint, bytes_read - chunk.size(), hash_func);
+				emit_chunk(chunk, current_fingerprint, bytes_read - chunk.size(), hash_func, whole);
 				chunk.clear();
 				init = true;
 			}
 		}
 
 		if (chunk.size() > 0)									// emit residual chunk at EOF
-			emit_chunk(chunk, current_fingerprint, bytes_read - chunk.size(), hash_func);
-		return true;
+			emit_chunk(chunk, current_fingerprint, bytes_read - chunk.size(), hash_func, whole);
+		return finish();
 	}
 
 	/**
@@ -153,10 +184,19 @@ public:
 		return chunks;
 	}
 
+	/**
+	* Digest of the entire input from the last generate_signatures call, or an
+	* empty vector when the call used WholeFileHash::Skip (the default) or
+	* failed.
+	*/
+	[[nodiscard]] const std::vector<uint8_t>& whole_file_hash() const noexcept {
+		return whole_hash_;
+	}
+
 private:
 	void emit_chunk(const std::vector<uint8_t>& data,
 	                typename T::RollingHashType signature,
-	                size_t start_offset, U& hash_func) {
+	                size_t start_offset, U& hash_func, U* whole_hasher) {
 		SignedChunk<typename T::RollingHashType> schunk;
 		schunk.signature = signature;
 		schunk.hash.resize(hash_func.get_hash_size());
@@ -164,9 +204,13 @@ private:
 		schunk.start_offset = start_offset;
 		schunk.chunk_size = data.size();
 		chunks.push_back(std::move(schunk));
+
+		if (whole_hasher)
+			whole_hasher->update(data);
 	}
 
 	std::vector<SignedChunk<typename T::RollingHashType>> chunks;
+	std::vector<uint8_t> whole_hash_;
 };
 
 
