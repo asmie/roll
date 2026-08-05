@@ -1,12 +1,12 @@
 #include "DeltaViewer.hpp"
 
+#include "DeltaCodec.hpp"
 #include "DeltaFormat.hpp"
+#include "FileIO.hpp"
+#include "blake2b.h"
 
-#include <algorithm>
-#include <bit>
 #include <cctype>
 #include <cstdint>
-#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -23,30 +23,6 @@ const char* entryTypeToString(EntryType type) {
 		case EntryType::REMOVED_CHUNK:  return "REMOVED";
 	}
 	return "UNKNOWN";
-}
-
-bool readExact(std::ifstream& file, void* out, std::streamsize size) {
-	file.read(reinterpret_cast<char*>(out), size);
-	return file.gcount() == size;
-}
-
-bool readUint64(std::ifstream& file, uint64_t& value) {
-	uint64_t v;
-	if (!readExact(file, &v, sizeof(v))) return false;
-	if constexpr (std::endian::native == std::endian::little)
-		v = std::byteswap(v);
-	value = v;
-	return true;
-}
-
-bool readUint32BE(std::ifstream& file, uint32_t& value) {
-	uint8_t bytes[4]{};
-	if (!readExact(file, bytes, sizeof(bytes))) return false;
-	value = (static_cast<uint32_t>(bytes[0]) << 24) |
-	        (static_cast<uint32_t>(bytes[1]) << 16) |
-	        (static_cast<uint32_t>(bytes[2]) << 8) |
-	        static_cast<uint32_t>(bytes[3]);
-	return true;
 }
 
 std::string printableByte(uint8_t byte) {
@@ -74,6 +50,13 @@ std::string hexByte(uint8_t byte) {
 	return out.str();
 }
 
+void printHex(const std::vector<uint8_t>& data) {
+	for (const uint8_t b : data)
+		std::cout << std::hex << std::setw(2) << std::setfill('0')
+		          << static_cast<int>(b);
+	std::cout << std::dec;
+}
+
 void printInlineBytes(const std::vector<uint8_t>& data) {
 	constexpr size_t maxBytes = 12;
 	std::cout << "\"";
@@ -91,57 +74,36 @@ void printInlineBytes(const std::vector<uint8_t>& data) {
 	}
 }
 
-bool parseDiffData(std::ifstream& file, size_t& diffSize, size_t& opCount, std::string& error) {
+// Walk the diff opcode run, printing the first few and tallying the rest. The
+// parsing itself lives in DeltaReader, so the viewer and the applier cannot
+// disagree about the encoding.
+bool parseDiffData(DeltaReader& reader, size_t& diffSize, size_t& opCount) {
 	constexpr size_t maxPrintedOps = 10;
 	diffSize = 0;
 	opCount = 0;
 
-	while (true) {
-		int next = file.peek();
-		if (next == EOF || (next != 'D' && next != 'X' && next != 'I')) break;
-
-		char op = static_cast<char>(file.get());
-		diffSize += 1;
-		uint32_t pos = 0;
-		if (!readUint32BE(file, pos)) {
-			error = "Truncated diff opcode: missing position";
+	while (reader.at_diff_opcode()) {
+		DiffOpcode opcode;
+		if (!reader.read_diff_opcode(opcode))
 			return false;
-		}
-		diffSize += sizeof(uint32_t);
 
-		if (op == 'D' || op == 'I') {
-			int countRaw = file.get();
-			if (countRaw == EOF) {
-				error = "Truncated diff opcode: missing byte count";
-				return false;
-			}
-
-			const auto count = static_cast<size_t>(static_cast<uint8_t>(countRaw));
-			diffSize += 1 + count;
-			std::vector<uint8_t> bytes(count);
-			if (count > 0 && !readExact(file, bytes.data(), static_cast<std::streamsize>(count))) {
-				error = "Truncated diff opcode: missing inline bytes";
-				return false;
-			}
-
-			if (opCount < maxPrintedOps) {
-				std::cout << "        "
-				          << (op == 'D' ? "Replace" : "Insert")
-				          << " " << count << " byte(s) at position " << pos << ": ";
-				printInlineBytes(bytes);
-				std::cout << std::endl;
-			}
-		} else {
-			uint32_t length = 0;
-			if (!readUint32BE(file, length)) {
-				error = "Truncated diff opcode: missing delete length";
-				return false;
-			}
+		diffSize += 1 + sizeof(uint32_t);
+		if (opcode.op == 'X')
 			diffSize += sizeof(uint32_t);
+		else
+			diffSize += 1 + opcode.bytes.size();
 
-			if (opCount < maxPrintedOps) {
-				std::cout << "        Delete " << length
-				          << " byte(s) at position " << pos << std::endl;
+		if (opCount < maxPrintedOps) {
+			if (opcode.op == 'X') {
+				std::cout << "        Delete " << opcode.delete_length
+				          << " byte(s) at position " << opcode.pos << std::endl;
+			} else {
+				std::cout << "        "
+				          << (opcode.op == 'D' ? "Replace" : "Insert")
+				          << " " << opcode.bytes.size() << " byte(s) at position "
+				          << opcode.pos << ": ";
+				printInlineBytes(opcode.bytes);
+				std::cout << std::endl;
 			}
 		}
 
@@ -158,8 +120,8 @@ bool parseDiffData(std::ifstream& file, size_t& diffSize, size_t& opCount, std::
 } // namespace
 
 int view_delta(const std::filesystem::path& delta_file) {
-	std::ifstream file(delta_file, std::ios::binary);
-	if (!file) {
+	FileIO file;
+	if (!file.open(delta_file, FileMode::IN)) {
 		std::cerr << "Error: Cannot open file " << delta_file << std::endl;
 		return 1;
 	}
@@ -167,99 +129,64 @@ int view_delta(const std::filesystem::path& delta_file) {
 	std::cout << "Delta File Viewer - Analyzing: " << delta_file << std::endl;
 	std::cout << "========================================" << std::endl << std::endl;
 
-	uint8_t header[DELTA_HEADER_SIZE];
-	if (!readExact(file, header, sizeof(header))) {
-		std::cerr << "Error: Truncated delta header" << std::endl;
+	// The digest length comes from the hash the tool is built with rather than a
+	// literal, so swapping the strong hash cannot desynchronise the viewer from
+	// the applier. The viewer is specialised to the shipped hash because it is
+	// not templated the way Delta/Apply are.
+	DeltaReader reader(file, BLAKE2b::HASH_SIZE);
+	if (!reader.read_header()) {
+		std::cerr << "Error: " << reader.error() << std::endl;
 		return 1;
 	}
-	if (!std::equal(std::begin(DELTA_MAGIC), std::end(DELTA_MAGIC), header)) {
-		std::cerr << "Error: Bad delta magic" << std::endl;
-		return 1;
-	}
-	uint32_t version = 0;
-	for (size_t i = 0; i < sizeof(version); ++i)
-		version = (version << 8) | header[sizeof(DELTA_MAGIC) + i];
-	std::cout << "Format version: " << version << std::endl << std::endl;
-	if (version != DELTA_FORMAT_VERSION) {
-		std::cerr << "Error: Unsupported delta version " << version
-		          << " (expected " << DELTA_FORMAT_VERSION << ")" << std::endl;
-		return 1;
-	}
+	std::cout << "Format version: " << DELTA_FORMAT_VERSION << std::endl << std::endl;
 
-	constexpr size_t hashSize = 64; // delta v2+ ⇒ BLAKE2b-512
 	int chunkNum = 0;
 	while (true) {
-		const int peek = file.peek();
-		if (peek == EOF) break;
-		if (peek == DELTA_TRAILER_TAG) {
-			file.get();  // consume tag
-			std::vector<uint8_t> trailer(hashSize);
-			if (!readExact(file, trailer.data(), hashSize)) {
-				std::cerr << "Error: Truncated whole-file trailer" << std::endl;
+		const auto item = reader.next_item();
+		if (item == DeltaReader::Item::End) break;
+
+		if (item == DeltaReader::Item::Trailer) {
+			std::vector<uint8_t> trailer;
+			if (!reader.read_trailer(trailer)) {
+				std::cerr << "Error: " << reader.error() << std::endl;
 				return 1;
 			}
 			std::cout << "Whole-file hash: ";
-			for (uint8_t b : trailer)
-				std::cout << std::hex << std::setw(2) << std::setfill('0')
-				          << static_cast<int>(b);
-			std::cout << std::dec << std::endl;
+			printHex(trailer);
+			std::cout << std::endl;
 			break;
 		}
 
-		uint64_t entryType;
-		if (!readUint64(file, entryType)) {
-			std::cerr << "Error: Truncated delta entry type" << std::endl;
+		DeltaEntryHeader header;
+		if (!reader.read_entry_header(header)) {
+			std::cerr << "Error: " << reader.error() << " in chunk #"
+			          << (chunkNum + 1) << std::endl;
 			return 1;
 		}
 
-		uint64_t signature;
-		if (!readUint64(file, signature)) {
-			std::cerr << "Error: Truncated signature in chunk #" << (chunkNum + 1) << std::endl;
-			return 1;
-		}
-
-		std::vector<uint8_t> hash(hashSize);
-		if (!readExact(file, hash.data(), hashSize)) {
-			std::cerr << "Error: Truncated hash in chunk #" << (chunkNum + 1) << std::endl;
-			return 1;
-		}
-
-		uint64_t chunkSize;
-		if (!readUint64(file, chunkSize)) {
-			std::cerr << "Error: Truncated chunk size in chunk #" << (chunkNum + 1) << std::endl;
-			return 1;
-		}
-
-		if (entryType > static_cast<uint64_t>(EntryType::REMOVED_CHUNK)) {
-			std::cerr << "Error: Unknown entry type " << entryType
+		if (static_cast<uint64_t>(header.type) >
+		    static_cast<uint64_t>(EntryType::REMOVED_CHUNK)) {
+			std::cerr << "Error: Unknown entry type "
+			          << static_cast<uint64_t>(header.type)
 			          << " in chunk #" << (chunkNum + 1) << std::endl;
 			return 1;
 		}
 
-		// Reject an out-of-range size before the ADDED payload allocation below.
-		if (chunkSize > DELTA_MAX_CHUNK_SIZE) {
-			std::cerr << "Error: Chunk #" << (chunkNum + 1) << " declares an "
-			          << "out-of-range chunk size " << chunkSize << std::endl;
-			return 1;
-		}
-
 		std::cout << "Chunk #" << ++chunkNum << ":" << std::endl;
-		std::cout << "  Type: " << entryTypeToString(static_cast<EntryType>(entryType))
-		          << " (" << entryType << ")" << std::endl;
-		std::cout << "  Signature: 0x" << std::hex << signature << std::dec << std::endl;
-		std::cout << "  Chunk Size: " << chunkSize << " bytes" << std::endl;
+		std::cout << "  Type: " << entryTypeToString(header.type)
+		          << " (" << static_cast<uint64_t>(header.type) << ")" << std::endl;
+		std::cout << "  Signature: 0x" << std::hex << header.signature
+		          << std::dec << std::endl;
+		std::cout << "  Chunk Size: " << header.chunk_size << " bytes" << std::endl;
 		std::cout << "  Hash: ";
-		for (size_t i = 0; i < hash.size(); i++) {
-			std::cout << std::hex << std::setw(2) << std::setfill('0')
-			          << static_cast<int>(hash[i]);
-		}
-		std::cout << std::dec << std::endl;
+		printHex(header.hash);
+		std::cout << std::endl;
 
-		if (entryType == static_cast<uint64_t>(EntryType::ADDED_CHUNK)) {
-			std::vector<uint8_t> rawData(static_cast<size_t>(chunkSize));
-			if (!rawData.empty() &&
-			    !readExact(file, rawData.data(), static_cast<std::streamsize>(rawData.size()))) {
-				std::cerr << "Error: Truncated ADDED payload in chunk #" << chunkNum << std::endl;
+		if (header.type == EntryType::ADDED_CHUNK) {
+			std::vector<uint8_t> rawData;
+			if (!reader.read_payload(static_cast<size_t>(header.chunk_size), rawData)) {
+				std::cerr << "Error: Truncated ADDED payload in chunk #"
+				          << chunkNum << std::endl;
 				return 1;
 			}
 
@@ -267,14 +194,14 @@ int view_delta(const std::filesystem::path& delta_file) {
 			printBytePreview(rawData, 50);
 			std::cout << "\"" << std::endl;
 
-		} else if (entryType == static_cast<uint64_t>(EntryType::MODIFIED_CHUNK)) {
+		} else if (header.type == EntryType::MODIFIED_CHUNK) {
 			size_t diffSize = 0;
 			size_t opCount = 0;
-			std::string error;
 
 			std::cout << "  Diff Operations:" << std::endl;
-			if (!parseDiffData(file, diffSize, opCount, error)) {
-				std::cerr << "Error: " << error << " in chunk #" << chunkNum << std::endl;
+			if (!parseDiffData(reader, diffSize, opCount)) {
+				std::cerr << "Error: " << reader.error() << " in chunk #"
+				          << chunkNum << std::endl;
 				return 1;
 			}
 

@@ -3,14 +3,13 @@
 
 #include "ChunkIndex.hpp"
 #include "Delta.hpp"
+#include "DeltaCodec.hpp"
 #include "DeltaFormat.hpp"
 #include "FileIO.hpp"
 #include "Signature.hpp"
 
 #include <algorithm>
-#include <bit>
 #include <cstdint>
-#include <cstring>
 #include <filesystem>
 #include <span>
 #include <string>
@@ -116,8 +115,11 @@ private:
 		}
 		output_opened = true;
 
-		if (!verifyHeader(delta, result))
+		DeltaReader reader(delta, U{}.get_hash_size());
+		if (!reader.read_header()) {
+			result.error_message = reader.error();
 			return result;
+		}
 
 		Signature<T, U> old_sig;
 		old_sig.generate_signatures(old_file);
@@ -136,13 +138,13 @@ private:
 		bool saw_trailer = false;
 
 		while (true) {
-			int peek = delta.peek_byte();
-			if (peek == EOF) break;
-			if (peek == DELTA_TRAILER_TAG) {
-				(void) delta.read_byte();
-				auto trailer = delta.read_chunk(hash_size);
-				if (trailer.size() != hash_size) {
-					result.error_message = "Truncated delta: short trailer";
+			const auto item = reader.next_item();
+			if (item == DeltaReader::Item::End) break;
+
+			if (item == DeltaReader::Item::Trailer) {
+				std::vector<uint8_t> trailer;
+				if (!reader.read_trailer(trailer)) {
+					result.error_message = reader.error();
 					return result;
 				}
 				std::vector<uint8_t> computed(hash_size);
@@ -155,39 +157,16 @@ private:
 				break;
 			}
 
-			uint64_t entry_type_raw;
-			if (!readU64BE(delta, entry_type_raw)) {
-				result.error_message = "Truncated delta: partial entry header";
+			DeltaEntryHeader header;
+			if (!reader.read_entry_header(header)) {
+				result.error_message = reader.error();
 				return result;
 			}
 
-			uint64_t signature;
-			if (!readU64BE(delta, signature)) {
-				result.error_message = "Truncated delta: missing signature";
-				return result;
-			}
-
-			auto hash_buf = delta.read_chunk(hash_size);
-			if (hash_buf.size() != hash_size) {
-				result.error_message = "Truncated delta: missing hash";
-				return result;
-			}
-
-			uint64_t chunk_size;
-			if (!readU64BE(delta, chunk_size)) {
-				result.error_message = "Truncated delta: missing chunk_size";
-				return result;
-			}
-
-			// Bound the declared size before it reaches any allocation
-			// (the ADDED payload read and applyDiff's output reserve).
-			if (chunk_size > DELTA_MAX_CHUNK_SIZE) {
-				result.error_message = "Delta entry declares an out-of-range chunk size: " +
-				                       std::to_string(chunk_size);
-				return result;
-			}
-
-			const auto entry_type = static_cast<EntryType>(entry_type_raw);
+			const auto entry_type = header.type;
+			const uint64_t signature = header.signature;
+			const uint64_t chunk_size = header.chunk_size;
+			auto hash_buf = std::move(header.hash);
 			if (seen_removed && entry_type != EntryType::REMOVED_CHUNK) {
 				result.error_message = "Non-REMOVED entry after REMOVED";
 				return result;
@@ -225,8 +204,8 @@ private:
 				}
 
 				case EntryType::ADDED_CHUNK: {
-					auto payload = delta.read_chunk(chunk_size);
-					if (payload.size() != chunk_size) {
+					std::vector<uint8_t> payload;
+					if (!reader.read_payload(chunk_size, payload)) {
 						result.error_message = "Truncated delta: short ADDED payload";
 						return result;
 					}
@@ -257,7 +236,7 @@ private:
 					}
 
 					std::vector<uint8_t> reconstructed;
-					if (!applyDiff(delta, old_data, chunk_size, reconstructed, result))
+					if (!applyDiff(reader, old_data, chunk_size, reconstructed, result))
 						return result;
 
 					if (!verifyHash(hash_func, hash_size, reconstructed, hash_buf)) {
@@ -330,55 +309,13 @@ private:
 		return computed == expected;
 	}
 
-	bool verifyHeader(FileIO& delta, Result& result) {
-		auto buf = delta.read_chunk(DELTA_HEADER_SIZE);
-		if (buf.size() != DELTA_HEADER_SIZE) {
-			result.error_message = "Truncated delta: missing header";
-			return false;
-		}
-		if (!std::equal(std::begin(DELTA_MAGIC), std::end(DELTA_MAGIC), buf.begin())) {
-			result.error_message = "Bad delta magic";
-			return false;
-		}
-		uint32_t version = 0;
-		for (size_t i = 0; i < sizeof(version); ++i)
-			version = (version << 8) | buf[sizeof(DELTA_MAGIC) + i];
-		if (version != DELTA_FORMAT_VERSION) {
-			result.error_message = "Unsupported delta version: " + std::to_string(version);
-			return false;
-		}
-		return true;
-	}
-
-	bool readU64BE(FileIO& f, uint64_t& out) {
-		auto buf = f.read_chunk(sizeof(uint64_t));
-		if (buf.size() != sizeof(uint64_t)) return false;
-		uint64_t v;
-		std::memcpy(&v, buf.data(), sizeof(uint64_t));
-		if constexpr (std::endian::native == std::endian::little)
-			v = std::byteswap(v);
-		out = v;
-		return true;
-	}
-
-	bool readU32BE(FileIO& f, uint32_t& out) {
-		auto buf = f.read_chunk(sizeof(uint32_t));
-		if (buf.size() != sizeof(uint32_t)) return false;
-		uint32_t v;
-		std::memcpy(&v, buf.data(), sizeof(uint32_t));
-		if constexpr (std::endian::native == std::endian::little)
-			v = std::byteswap(v);
-		out = v;
-		return true;
-	}
-
 	/**
 	* Parse 'D'/'X'/'I' opcodes from delta against old_data, producing exactly
 	* target_size output bytes. Stops when next byte is not a recognized opcode;
 	* remaining bytes are tail-copied from old_data. Requires at least one
 	* opcode — a MODIFIED entry with no opcodes is malformed.
 	*/
-	bool applyDiff(FileIO& delta, const std::vector<uint8_t>& old_data,
+	bool applyDiff(DeltaReader& reader, const std::vector<uint8_t>& old_data,
 	               uint64_t target_size, std::vector<uint8_t>& output, Result& result) {
 		output.reserve(target_size);
 		size_t old_pos = 0;
@@ -388,25 +325,19 @@ private:
 		// Drain every opcode in this entry's diff payload. Stopping at
 		// output.size() == target_size would leave a trailing 'X' (delete tail)
 		// unread, which the outer parser would then misread as the next entry.
-		while (true) {
-			int peek = delta.peek_byte();
-			if (peek != 'D' && peek != 'X' && peek != 'I') break;
-
-			(void) delta.read_byte();
-			char op = static_cast<char>(peek);
-			++opcodes_seen;
-
-			uint32_t pos;
-			if (!readU32BE(delta, pos)) {
-				result.error_message = "Truncated diff: missing pos";
+		while (reader.at_diff_opcode()) {
+			DiffOpcode opcode;
+			if (!reader.read_diff_opcode(opcode)) {
+				result.error_message = reader.error();
 				return false;
 			}
+			++opcodes_seen;
 
-			if (pos < new_pos) {
+			if (opcode.pos < new_pos) {
 				result.error_message = "Diff position went backwards";
 				return false;
 			}
-			size_t match_len = pos - new_pos;
+			size_t match_len = opcode.pos - new_pos;
 			if (old_pos + match_len > old_data.size() ||
 			    output.size() + match_len > target_size) {
 				result.error_message = "Diff out of bounds (match copy)";
@@ -418,25 +349,15 @@ private:
 			old_pos += match_len;
 			new_pos += match_len;
 
-			if (op == 'D' || op == 'I') {
-				int count_int = delta.read_byte();
-				if (count_int == EOF) {
-					result.error_message = "Truncated diff: missing count byte";
-					return false;
-				}
-				uint8_t count = static_cast<uint8_t>(count_int);
-				auto inline_buf = delta.read_chunk(count);
-				if (inline_buf.size() != count) {
-					result.error_message = "Truncated diff: missing inline bytes";
-					return false;
-				}
+			if (opcode.op == 'D' || opcode.op == 'I') {
+				const size_t count = opcode.bytes.size();
 				if (output.size() + count > target_size) {
 					result.error_message = "Diff out of bounds (inline write)";
 					return false;
 				}
-				output.insert(output.end(), inline_buf.begin(), inline_buf.end());
+				output.insert(output.end(), opcode.bytes.begin(), opcode.bytes.end());
 				new_pos += count;
-				if (op == 'D') {
+				if (opcode.op == 'D') {
 					if (old_pos + count > old_data.size()) {
 						result.error_message = "Diff out of bounds (D advance)";
 						return false;
@@ -444,16 +365,11 @@ private:
 					old_pos += count;
 				}
 			} else { // 'X'
-				uint32_t length;
-				if (!readU32BE(delta, length)) {
-					result.error_message = "Truncated diff: missing X length";
-					return false;
-				}
-				if (old_pos + length > old_data.size()) {
+				if (old_pos + opcode.delete_length > old_data.size()) {
 					result.error_message = "Diff out of bounds (X delete)";
 					return false;
 				}
-				old_pos += length;
+				old_pos += opcode.delete_length;
 			}
 		}
 

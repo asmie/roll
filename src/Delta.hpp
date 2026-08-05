@@ -2,12 +2,12 @@
 #define DELTA_HPP
 
 #include "ChunkIndex.hpp"
+#include "DeltaCodec.hpp"
 #include "DeltaFormat.hpp"
 #include "Signature.hpp"
 #include "FileIO.hpp"
 
 #include <algorithm>
-#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -67,18 +67,23 @@ public:
             return result;
         }
 
-        if (!writeHeader(delta, result))
+        DeltaWriter writer(delta);
+        if (!writer.write_header()) {
+            result.error_message = writer.error();
             return result;
+        }
 
         const auto& original_chunks = original.get_chunks();
         const auto& new_chunks = newfile.get_chunks();
 
         auto chunk_map = build_chunk_map(original_chunks);
         bool ok = processMultipleChunks(original_chunks, new_chunks, chunk_map,
-                                        old, file, delta, result);
+                                        old, file, writer, result);
 
         if (ok)
-            ok = writeTrailer(file, delta, result);
+            ok = writeTrailer(file, writer, result);
+
+        result.bytes_written = writer.bytes_written();
 
         old.close();
         file.close();
@@ -97,7 +102,7 @@ private:
     // Stream-hash the entire new-file content in fixed-size buffers and emit
     // (DELTA_TRAILER_TAG | hash) so the applier can verify end-to-end
     // reconstruction, not just per-chunk hashes.
-    bool writeTrailer(FileIO& file, FileIO& delta, Result& result) {
+    bool writeTrailer(FileIO& file, DeltaWriter& writer, Result& result) {
         U hash_func;
         hash_func.init();
 
@@ -111,29 +116,10 @@ private:
         std::vector<uint8_t> digest(hash_func.get_hash_size());
         hash_func.finalize(digest);
 
-        const uint8_t tag = DELTA_TRAILER_TAG;
-        if (!delta.write_chunk(std::span<const uint8_t>{&tag, 1})) {
-            result.error_message = "Failed to write trailer tag";
+        if (!writer.write_trailer(digest)) {
+            result.error_message = writer.error();
             return false;
         }
-        if (!delta.write_chunk(digest)) {
-            result.error_message = "Failed to write trailer hash";
-            return false;
-        }
-        result.bytes_written += 1 + digest.size();
-        return true;
-    }
-
-    bool writeHeader(FileIO& delta, Result& result) {
-        std::vector<uint8_t> header;
-        header.reserve(DELTA_HEADER_SIZE);
-        header.insert(header.end(), std::begin(DELTA_MAGIC), std::end(DELTA_MAGIC));
-        pushUint32(header, DELTA_FORMAT_VERSION);
-        if (!delta.write_chunk(header)) {
-            result.error_message = "Failed to write delta header";
-            return false;
-        }
-        result.bytes_written += header.size();
         return true;
     }
 
@@ -166,7 +152,7 @@ private:
     bool processMultipleChunks(const std::vector<SignedChunk<typename T::RollingHashType>>& original_chunks,
                                const std::vector<SignedChunk<typename T::RollingHashType>>& new_chunks,
                                const ChunkMap& chunk_map,
-                               FileIO& old, FileIO& file, FileIO& delta, Result& result) {
+                               FileIO& old, FileIO& file, DeltaWriter& writer, Result& result) {
         std::vector<bool> original_used(original_chunks.size(), false);
 
         for (size_t i = 0; i < new_chunks.size(); ++i) {
@@ -178,7 +164,7 @@ private:
                 entry.type = EntryType::ORIGINAL_CHUNK;
                 entry.chunk_data = original_chunks[i];
                 original_used[i] = true;
-                if (!writeDeltaEntry(delta, entry, result)) return false;
+                if (!writeDeltaEntry(writer, entry, result)) return false;
                 result.chunks_processed++;
                 continue;
             }
@@ -189,7 +175,7 @@ private:
                 entry.type = EntryType::ORIGINAL_CHUNK;
                 entry.chunk_data = new_chunks[i];
                 original_used[it->second] = true;
-                if (!writeDeltaEntry(delta, entry, result)) return false;
+                if (!writeDeltaEntry(writer, entry, result)) return false;
                 result.chunks_processed++;
                 continue;
             }
@@ -220,7 +206,7 @@ private:
                                                        entry.chunk_data.start_offset);
             }
 
-            if (!writeDeltaEntry(delta, entry, result)) return false;
+            if (!writeDeltaEntry(writer, entry, result)) return false;
             result.chunks_processed++;
         }
 
@@ -230,7 +216,7 @@ private:
                 DeltaEntry<typename T::RollingHashType> entry;
                 entry.type = EntryType::REMOVED_CHUNK;
                 entry.chunk_data = original_chunks[i];
-                if (!writeDeltaEntry(delta, entry, result)) return false;
+                if (!writeDeltaEntry(writer, entry, result)) return false;
                 result.chunks_processed++;
             }
         }
@@ -376,8 +362,8 @@ private:
         } else {
             if (deletes > 0) {
                 diff.push_back('X');
-                pushUint32(diff, static_cast<uint32_t>(pos));
-                pushUint32(diff, static_cast<uint32_t>(deletes));
+                push_u32_be(diff, static_cast<uint32_t>(pos));
+                push_u32_be(diff, static_cast<uint32_t>(deletes));
             }
             if (!inserts.empty())
                 emitInlineBytes(diff, 'I', pos, inserts);
@@ -391,7 +377,7 @@ private:
         while (off < bytes.size()) {
             const size_t count = std::min<size_t>(255, bytes.size() - off);
             diff.push_back(static_cast<uint8_t>(op));
-            pushUint32(diff, static_cast<uint32_t>(pos + off));
+            push_u32_be(diff, static_cast<uint32_t>(pos + off));
             diff.push_back(static_cast<uint8_t>(count));
             diff.insert(diff.end(), bytes.begin() + off, bytes.begin() + off + count);
             off += count;
@@ -419,7 +405,7 @@ private:
             }
             if (!diff_bytes.empty()) {
                 diff.push_back('D');
-                pushUint32(diff, static_cast<uint32_t>(diff_start));
+                push_u32_be(diff, static_cast<uint32_t>(diff_start));
                 diff.push_back(static_cast<uint8_t>(diff_bytes.size()));
                 diff.insert(diff.end(), diff_bytes.begin(), diff_bytes.end());
             }
@@ -427,13 +413,13 @@ private:
 
         if (i < old_data.size()) {
             diff.push_back('X');
-            pushUint32(diff, static_cast<uint32_t>(i));
-            pushUint32(diff, static_cast<uint32_t>(old_data.size() - i));
+            push_u32_be(diff, static_cast<uint32_t>(i));
+            push_u32_be(diff, static_cast<uint32_t>(old_data.size() - i));
         }
         while (j < new_data.size()) {
             size_t count = std::min(size_t(255), new_data.size() - j);
             diff.push_back('I');
-            pushUint32(diff, static_cast<uint32_t>(j));
+            push_u32_be(diff, static_cast<uint32_t>(j));
             diff.push_back(static_cast<uint8_t>(count));
             for (size_t k = 0; k < count; ++k)
                 diff.push_back(new_data[j + k]);
@@ -466,54 +452,21 @@ private:
     std::vector<int> myers_trace_;
 
     /**
-    * Helper to push 32-bit value as 4 bytes
+    * Write one delta entry. The byte layout lives in DeltaCodec.
     */
-    void pushUint32(std::vector<uint8_t>& vec, uint32_t value) {
-        auto encoded = value;
-        if constexpr (std::endian::native == std::endian::little) {
-            encoded = std::byteswap(encoded);
-        }
-
-        for (const auto byte : std::as_bytes(std::span{&encoded, 1})) {
-            vec.push_back(std::to_integer<uint8_t>(byte));
-        }
-    }
-
-    /**
-    * Write delta entry to file
-    */
-    bool writeDeltaEntry(FileIO& delta, const DeltaEntry<typename T::RollingHashType>& entry,
+    bool writeDeltaEntry(DeltaWriter& writer, const DeltaEntry<typename T::RollingHashType>& entry,
                         Result& result) {
-        if (!delta.write_chunk(static_cast<uint64_t>(std::to_underlying(entry.type)))) {
-            result.error_message = "Failed to write entry type";
-            return false;
-        }
-        result.bytes_written += sizeof(uint64_t);
+        const bool has_payload = entry.type == EntryType::ADDED_CHUNK ||
+                                 entry.type == EntryType::MODIFIED_CHUNK;
+        const auto payload = has_payload
+            ? std::span<const uint8_t>{entry.chunk_data_raw}
+            : std::span<const uint8_t>{};
 
-        if (!delta.write_chunk(entry.chunk_data.signature)) {
-            result.error_message = "Failed to write signature";
+        if (!writer.write_entry(entry.type, entry.chunk_data.signature,
+                                entry.chunk_data.hash, entry.chunk_data.chunk_size,
+                                payload)) {
+            result.error_message = writer.error();
             return false;
-        }
-        result.bytes_written += sizeof(entry.chunk_data.signature);
-
-        if (!delta.write_chunk(entry.chunk_data.hash)) {
-            result.error_message = "Failed to write hash";
-            return false;
-        }
-        result.bytes_written += entry.chunk_data.hash.size();
-
-        if (!delta.write_chunk(entry.chunk_data.chunk_size)) {
-            result.error_message = "Failed to write chunk size";
-            return false;
-        }
-        result.bytes_written += sizeof(entry.chunk_data.chunk_size);
-
-        if (entry.type == EntryType::ADDED_CHUNK || entry.type == EntryType::MODIFIED_CHUNK) {
-            if (!delta.write_chunk(entry.chunk_data_raw)) {
-                result.error_message = "Failed to write payload";
-                return false;
-            }
-            result.bytes_written += entry.chunk_data_raw.size();
         }
         return true;
     }
