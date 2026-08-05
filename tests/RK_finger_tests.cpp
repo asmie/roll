@@ -1,7 +1,37 @@
-#include <limits.h>
 #include "gtest/gtest.h"
 
 #include "RK_finger.hpp"
+
+#include <cstdint>
+#include <span>
+#include <vector>
+
+namespace {
+
+// Independent reference: the polynomial window hash computed straight from the
+// definition with a plain remainder. reduce()'s Mersenne fast path must agree
+// with this exactly, or chunk boundaries (and every delta) would shift.
+uint64_t naive_window_hash(std::span<const uint8_t> window, uint64_t alphabet,
+                           uint64_t modulus)
+{
+	uint64_t h = 0;
+	for (const uint8_t b : window)
+		h = (alphabet * h + b) % modulus;
+	return h;
+}
+
+std::vector<uint8_t> patterned_data(size_t n, uint32_t seed)
+{
+	std::vector<uint8_t> data(n);
+	uint32_t x = seed;
+	for (auto& b : data) {
+		x = x * 1103515245u + 12345u;
+		b = static_cast<uint8_t>(x >> 16);
+	}
+	return data;
+}
+
+} // namespace
 
 TEST(RKfinger, initialize_correct)
 {
@@ -89,7 +119,7 @@ TEST(RKfinger, default_params)
 
 	EXPECT_EQ(rk.get_alphabet_size(), ALPHABET_DEF_SIZE);
 	EXPECT_EQ(rk.get_window_size(), WINDOW_DEF_SIZE);
-	EXPECT_EQ(rk.get_modulus(), INT_MAX);
+	EXPECT_EQ(rk.get_modulus(), MODULUS_DEF_SIZE);
 }
 
 TEST(RKfinger, get_current_fingerprint_tracks_compute_next)
@@ -100,4 +130,70 @@ TEST(RKfinger, get_current_fingerprint_tracks_compute_next)
 	ASSERT_TRUE(rk.initialize(init));
 	const uint64_t after_roll = rk.compute_next(10);
 	EXPECT_EQ(rk.get_current_fingerprint(), after_roll);
+}
+// reduce() takes a Mersenne fast path on the default M31 modulus. Every rolled
+// fingerprint must match the naive definition at every position, otherwise the
+// optimisation silently changes chunking.
+TEST(RKfinger, mersenne_reduction_matches_naive_at_every_position)
+{
+	const auto data = patterned_data(4096, 0xA5A5u);
+
+	RKFinger rk;
+	ASSERT_TRUE(rk.initialize(std::span<const uint8_t>{data.data(), WINDOW_DEF_SIZE}));
+	EXPECT_EQ(rk.get_current_fingerprint(),
+	          naive_window_hash(std::span<const uint8_t>{data.data(), WINDOW_DEF_SIZE},
+	                            ALPHABET_DEF_SIZE, MODULUS_DEF_SIZE));
+
+	for (size_t i = WINDOW_DEF_SIZE; i < data.size(); ++i) {
+		const uint64_t rolled = rk.compute_next(data[i]);
+		const auto window = std::span<const uint8_t>{
+			data.data() + (i - WINDOW_DEF_SIZE + 1), WINDOW_DEF_SIZE};
+		ASSERT_EQ(rolled, naive_window_hash(window, ALPHABET_DEF_SIZE, MODULUS_DEF_SIZE))
+			<< "diverged from the naive reference at byte " << i;
+	}
+}
+
+// A non-Mersenne modulus must fall back to the plain remainder and stay
+// correct. 123010 is not a power of two, so no fast path applies here.
+TEST(RKfinger, non_mersenne_modulus_matches_naive)
+{
+	constexpr uint64_t MOD = 123009;
+	constexpr unsigned ALPHA = 251;
+	constexpr unsigned WIN = 30;
+	const auto data = patterned_data(2048, 0x5A5Au);
+
+	RKFinger rk(ALPHA, WIN, MOD);
+	ASSERT_TRUE(rk.initialize(std::span<const uint8_t>{data.data(), WIN}));
+	EXPECT_EQ(rk.get_current_fingerprint(),
+	          naive_window_hash(std::span<const uint8_t>{data.data(), WIN}, ALPHA, MOD));
+
+	for (size_t i = WIN; i < data.size(); ++i) {
+		const uint64_t rolled = rk.compute_next(data[i]);
+		const auto window = std::span<const uint8_t>{data.data() + (i - WIN + 1), WIN};
+		ASSERT_EQ(rolled, naive_window_hash(window, ALPHA, MOD))
+			<< "diverged from the naive reference at byte " << i;
+	}
+}
+
+// A Mersenne modulus small enough that a single fold would *not* land in range
+// must also stay correct — configure_fast_reduction has to reject it rather
+// than enable an unsafe fold. 2^5-1 = 31 with alphabet 256 is such a case.
+TEST(RKfinger, small_mersenne_modulus_matches_naive)
+{
+	constexpr uint64_t MOD = 31;  // 2^5 - 1
+	constexpr unsigned WIN = 16;
+	const auto data = patterned_data(1024, 0x1234u);
+
+	RKFinger rk(ALPHABET_DEF_SIZE, WIN, MOD);
+	ASSERT_TRUE(rk.initialize(std::span<const uint8_t>{data.data(), WIN}));
+	EXPECT_EQ(rk.get_current_fingerprint(),
+	          naive_window_hash(std::span<const uint8_t>{data.data(), WIN},
+	                            ALPHABET_DEF_SIZE, MOD));
+
+	for (size_t i = WIN; i < data.size(); ++i) {
+		const uint64_t rolled = rk.compute_next(data[i]);
+		const auto window = std::span<const uint8_t>{data.data() + (i - WIN + 1), WIN};
+		ASSERT_EQ(rolled, naive_window_hash(window, ALPHABET_DEF_SIZE, MOD))
+			<< "diverged from the naive reference at byte " << i;
+	}
 }
