@@ -121,6 +121,47 @@ jobs:
         cmp new.txt rebuilt.txt
         "$PWD/stage/bin/rolling_hash" view changes.delta > /dev/null
 
+  # apply and view parse fully attacker-controlled input. Where libFuzzer is
+  # available this is a real fuzzing run; otherwise the same targets build as
+  # replay drivers and re-check the generated corpus, which still catches a
+  # regression in the parser's bounds or in Apply's cleanup-on-failure promise.
+  fuzz:
+    name: linux-fuzz
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    # Clang 19+ reports __cpp_concepts as 202002, so it has std::expected with
+    # libstdc++ — which libFuzzer's runtime is also built against. Clang 18 with
+    # libc++ cannot link libFuzzer (mismatched standard libraries).
+    - name: Install Clang 19
+      run: sudo apt-get update && sudo apt-get install -y clang-19
+
+    - name: Configure
+      env:
+        CC: clang-19
+        CXX: clang++-19
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DRH_BUILD_FUZZERS=ON -DBUILD_TESTING=OFF
+
+    - name: Build
+      run: cmake --build build --parallel
+
+    - name: Generate the seed corpus
+      run: ./fuzz/make_corpus.sh build/rolling_hash corpus
+
+    - name: Fuzz apply and view
+      env:
+        ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+        UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+      run: |
+        if [ -x build/fuzz_apply ]; then
+          build/fuzz_apply corpus -max_total_time=120 -max_len=65536 -print_final_stats=1
+          build/fuzz_roundtrip corpus -max_total_time=120 -max_len=65536 -print_final_stats=1
+        else
+          build/fuzz_apply_replay corpus/*.delta
+          build/fuzz_roundtrip_replay corpus/*.delta
+        fi
+
   format:
     name: clang-format
     runs-on: ubuntu-latest

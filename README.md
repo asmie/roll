@@ -84,6 +84,34 @@ cmake --build build --config Release
 | `RH_BUILD_TESTS` | follows `BUILD_TESTING` | Overrides the test target independently |
 | `RH_ENABLE_ASAN` | `OFF` | Builds with AddressSanitizer and UBSan |
 
+### Fuzzing
+
+`apply` and `view` parse untrusted input, so the parsers have fuzz targets:
+
+```bash
+cmake -B build-fuzz -DCMAKE_BUILD_TYPE=Debug -DRH_BUILD_FUZZERS=ON -DBUILD_TESTING=OFF
+cmake --build build-fuzz -j$(nproc)
+./fuzz/make_corpus.sh build-fuzz/rolling_hash corpus
+build-fuzz/fuzz_apply corpus -max_total_time=60      # libFuzzer builds
+build-fuzz/fuzz_apply_replay corpus/*.delta          # otherwise
+```
+
+`fuzz_apply` drives hostile deltas through both readers; `fuzz_roundtrip`
+generates a delta between two halves of the input and requires an exact
+reconstruction. Both check invariants beyond "did not crash": a failed apply
+must leave no output file, a successful one must be deterministic, and a
+freshly generated delta must always apply.
+
+Where the compiler supports libFuzzer these are coverage-guided fuzzers;
+elsewhere they build as replay drivers that re-check the corpus, so the targets
+stay useful as regression tests. Note that Clang 18 cannot build them: libFuzzer's
+runtime links against libstdc++ while this project needs libc++ there, so use
+Clang 19+ (which works with libstdc++) for real fuzzing.
+
+The corpus is generated rather than committed — a stored delta is pinned to the
+format version that produced it, and after a version bump would only exercise
+the version-rejection path.
+
 ### Install
 
 ```bash

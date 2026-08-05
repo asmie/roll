@@ -170,6 +170,48 @@ target_link_libraries(${PROJECT_NAME} PRIVATE rh_core)
 include(GNUInstallDirs)
 install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+# ---- Fuzzing --------------------------------------------------------------
+#
+# The fuzz targets are built two ways. Where the compiler supports libFuzzer
+# (Clang), they become real coverage-guided fuzzers. Everywhere else they build
+# against a replay driver, so a committed corpus and any recorded crash input
+# stay runnable as regression tests under the project's normal compiler.
+
+option(RH_BUILD_FUZZERS "Build the fuzz targets" OFF)
+
+if (RH_BUILD_FUZZERS)
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "-fsanitize=fuzzer")
+    check_cxx_source_compiles("
+        #include <cstdint>
+        #include <cstddef>
+        extern \"C\" int LLVMFuzzerTestOneInput(const uint8_t*, size_t) { return 0; }
+    " RH_HAVE_LIBFUZZER)
+    unset(CMAKE_REQUIRED_FLAGS)
+
+    if (NOT RH_HAVE_LIBFUZZER)
+        # Note for Clang 18: libFuzzer's runtime is built against libstdc++, but
+        # this project needs libc++ there for std::expected, so the two cannot be
+        # linked together. Clang 19+ works with libstdc++ and therefore with
+        # libFuzzer. Replay drivers keep the corpus runnable meanwhile.
+        message(STATUS "libFuzzer unavailable; building fuzz targets as replay drivers")
+    endif()
+
+    foreach(_name fuzz_apply fuzz_roundtrip)
+        if (RH_HAVE_LIBFUZZER)
+            add_executable(${_name} fuzz/${_name}.cpp)
+            target_compile_options(${_name} PRIVATE -fsanitize=fuzzer,address,undefined)
+            target_link_options(${_name} PRIVATE -fsanitize=fuzzer,address,undefined)
+            target_link_libraries(${_name} PRIVATE rh_core)
+            target_include_directories(${_name} PRIVATE "${PROJECT_SOURCE_DIR}/fuzz")
+        else()
+            add_executable(${_name}_replay fuzz/${_name}.cpp fuzz/replay_main.cpp)
+            target_link_libraries(${_name}_replay PRIVATE rh_core)
+            target_include_directories(${_name}_replay PRIVATE "${PROJECT_SOURCE_DIR}/fuzz")
+        endif()
+    endforeach()
+endif()
+
 # ---- Testing --------------------------------------------------------------
 #
 # Gated so a consumer who only wants the binary neither downloads GoogleTest nor
