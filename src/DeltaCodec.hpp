@@ -90,7 +90,7 @@ struct DiffOpcode {
 	std::vector<uint8_t> bytes;
 };
 
-inline bool is_diff_opcode(int byte)
+[[nodiscard]] inline bool is_diff_opcode(int byte)
 {
 	return byte == 'D' || byte == 'I' || byte == 'X';
 }
@@ -105,7 +105,7 @@ class DeltaWriter {
 public:
 	explicit DeltaWriter(FileIO& out) : out_(out) {}
 
-	bool write_header()
+	[[nodiscard]] bool write_header()
 	{
 		std::vector<uint8_t> header;
 		header.reserve(DELTA_HEADER_SIZE);
@@ -118,7 +118,7 @@ public:
 	* Write one entry. `payload` carries the raw chunk bytes for ADDED or the
 	* diff opcode run for MODIFIED, and must be empty for ORIGINAL/REMOVED.
 	*/
-	bool write_entry(EntryType type, uint64_t signature,
+	[[nodiscard]] bool write_entry(EntryType type, uint64_t signature,
 	                 std::span<const uint8_t> hash, uint64_t chunk_size,
 	                 std::span<const uint8_t> payload)
 	{
@@ -132,7 +132,7 @@ public:
 		return emit(record, "delta entry");
 	}
 
-	bool write_trailer(std::span<const uint8_t> digest)
+	[[nodiscard]] bool write_trailer(std::span<const uint8_t> digest)
 	{
 		std::vector<uint8_t> trailer;
 		trailer.reserve(1 + digest.size());
@@ -141,8 +141,8 @@ public:
 		return emit(trailer, "delta trailer");
 	}
 
-	size_t bytes_written() const noexcept { return bytes_written_; }
-	const std::string& error() const noexcept { return error_; }
+	[[nodiscard]] size_t bytes_written() const noexcept { return bytes_written_; }
+	[[nodiscard]] const std::string& error() const noexcept { return error_; }
 
 private:
 	bool emit(const std::vector<uint8_t>& bytes, const char* what)
@@ -174,7 +174,7 @@ public:
 
 	DeltaReader(FileIO& in, size_t hash_size) : in_(in), hash_size_(hash_size) {}
 
-	bool read_header()
+	[[nodiscard]] bool read_header()
 	{
 		auto buf = in_.read_chunk(DELTA_HEADER_SIZE);
 		if (buf.size() != DELTA_HEADER_SIZE) {
@@ -193,7 +193,7 @@ public:
 		return true;
 	}
 
-	Item next_item()
+	[[nodiscard]] Item next_item()
 	{
 		const int peek = in_.peek_byte();
 		if (peek == EOF)
@@ -208,7 +208,7 @@ public:
 	* format bound. The size field is attacker-controlled and feeds allocations
 	* downstream, so it is checked here rather than at each use.
 	*/
-	bool read_entry_header(DeltaEntryHeader& out)
+	[[nodiscard]] bool read_entry_header(DeltaEntryHeader& out)
 	{
 		std::vector<uint8_t> buf;
 		if (!read_exact(2 * sizeof(uint64_t) + hash_size_ + sizeof(uint64_t), buf)) {
@@ -232,7 +232,7 @@ public:
 	}
 
 	/// Read exactly `count` payload bytes.
-	bool read_payload(size_t count, std::vector<uint8_t>& out)
+	[[nodiscard]] bool read_payload(size_t count, std::vector<uint8_t>& out)
 	{
 		if (!read_exact(count, out)) {
 			error_ = "Truncated delta: short payload";
@@ -241,13 +241,13 @@ public:
 		return true;
 	}
 
-	bool at_diff_opcode() { return is_diff_opcode(in_.peek_byte()); }
+	[[nodiscard]] bool at_diff_opcode() { return is_diff_opcode(in_.peek_byte()); }
 
 	/**
 	* Read one diff opcode. Call only while at_diff_opcode() is true; the opcode
 	* run ends at the first byte that is not a recognised opcode.
 	*/
-	bool read_diff_opcode(DiffOpcode& out)
+	[[nodiscard]] bool read_diff_opcode(DiffOpcode& out)
 	{
 		const int tag = in_.read_byte();
 		if (!is_diff_opcode(tag)) {
@@ -285,7 +285,7 @@ public:
 		return true;
 	}
 
-	bool read_trailer(std::vector<uint8_t>& digest)
+	[[nodiscard]] bool read_trailer(std::vector<uint8_t>& digest)
 	{
 		if (in_.read_byte() != DELTA_TRAILER_TAG) {
 			error_ = "Truncated delta: missing trailer tag";
@@ -298,8 +298,8 @@ public:
 		return true;
 	}
 
-	size_t hash_size() const noexcept { return hash_size_; }
-	const std::string& error() const noexcept { return error_; }
+	[[nodiscard]] size_t hash_size() const noexcept { return hash_size_; }
+	[[nodiscard]] const std::string& error() const noexcept { return error_; }
 
 private:
 	bool read_exact(size_t count, std::vector<uint8_t>& out)

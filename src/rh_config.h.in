@@ -20,8 +20,10 @@
 #cmakedefine RH_HAVE_CSTDIO
 #cmakedefine RH_HAVE_CSTDLIB
 #cmakedefine RH_HAVE_CSTRING
+#cmakedefine RH_HAVE_EXPECTED
 #cmakedefine RH_HAVE_FILESYSTEM
 #cmakedefine RH_HAVE_FSTREAM
+#cmakedefine RH_HAVE_FUNCTIONAL
 #cmakedefine RH_HAVE_IOMANIP
 #cmakedefine RH_HAVE_IOSTREAM
 #cmakedefine RH_HAVE_LIMITS
@@ -31,6 +33,7 @@
 #cmakedefine RH_HAVE_STRING
 #cmakedefine RH_HAVE_STRING_VIEW
 #cmakedefine RH_HAVE_SYSTEM_ERROR
+#cmakedefine RH_HAVE_TYPE_TRAITS
 #cmakedefine RH_HAVE_UNORDERED_MAP
 #cmakedefine RH_HAVE_UTILITY
 #cmakedefine RH_HAVE_VECTOR
@@ -47,6 +50,7 @@
 #cmakedefine RH_HAVE_STD_SPAN            // <span>, C++20
 #cmakedefine RH_HAVE_STD_FILESYSTEM      // <filesystem>, C++17
 #cmakedefine RH_HAVE_STD_TO_UNDERLYING   // <utility>, C++23
+#cmakedefine RH_HAVE_STD_EXPECTED        // <expected>, C++23
 #cmakedefine RH_HAVE_STD_CONCEPTS_DERIVED_FROM  // <concepts>, C++20
 
 // ---- Critical-header gate -------------------------------------------------
@@ -56,6 +60,7 @@
 // preprocess time rather than at deep template-instantiation time.
 
 #if !defined(RH_HAVE_BIT) || !defined(RH_HAVE_CONCEPTS) || \
+    !defined(RH_HAVE_EXPECTED) || \
     !defined(RH_HAVE_FILESYSTEM) || !defined(RH_HAVE_SPAN) || \
     !defined(RH_HAVE_STRING_VIEW) || !defined(RH_HAVE_SYSTEM_ERROR) || \
     !defined(RH_HAVE_CSTDINT) || !defined(RH_HAVE_VECTOR) || \
@@ -67,9 +72,9 @@
 
 #if !defined(RH_HAVE_STD_BYTESWAP) || !defined(RH_HAVE_STD_ENDIAN) || \
     !defined(RH_HAVE_STD_SPAN) || !defined(RH_HAVE_STD_FILESYSTEM) || \
-    !defined(RH_HAVE_STD_TO_UNDERLYING) || \
+    !defined(RH_HAVE_STD_TO_UNDERLYING) || !defined(RH_HAVE_STD_EXPECTED) || \
     !defined(RH_HAVE_STD_CONCEPTS_DERIVED_FROM)
-#error "rolling_hash needs std::byteswap, std::endian, std::span, std::filesystem, std::to_underlying, and std::derived_from."
+#error "rolling_hash needs std::byteswap, std::endian, std::span, std::filesystem, std::to_underlying, std::expected, and std::derived_from."
 #endif
 
 #endif /* GENERATED_RH_CONFIG_H_IN */

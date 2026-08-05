@@ -6,6 +6,7 @@
 
 #include "Apply.hpp"
 #include "Delta.hpp"
+#include "DeltaError.hpp"
 #include "DeltaViewer.hpp"
 #include "RK_finger.hpp"
 #include "Signature.hpp"
@@ -29,6 +30,28 @@ void print_usage(const char* prog, std::ostream& os = std::cerr)
 	   << "  " << prog << " --help\n";
 }
 
+// Map a failure category to an exit status: bad input the user can act on is
+// distinguished from an environment or I/O problem.
+int exit_status_for(DeltaErrc code)
+{
+	switch (code) {
+		case DeltaErrc::corrupt_delta:
+		case DeltaErrc::integrity_mismatch:
+		case DeltaErrc::invalid_argument:
+			return 1;
+		case DeltaErrc::io_error:
+		case DeltaErrc::internal_error:
+			return 2;
+	}
+	return 1;
+}
+
+void report(const char* action, const DeltaError& error)
+{
+	std::cerr << "Error " << action << ": " << error.message
+	          << " (" << to_string(error.code) << ")" << std::endl;
+}
+
 int run_create(const char* old_path, const char* new_path, const char* delta_path)
 {
 	Signature<RKFinger, BLAKE2b> old_signature;
@@ -44,11 +67,12 @@ int run_create(const char* old_path, const char* new_path, const char* delta_pat
 	}
 
 	Delta<RKFinger, BLAKE2b> delta;
-	auto result = delta.generate_delta(old_signature, new_signature, old_path, new_path, delta_path);
+	const auto result = delta.generate_delta(old_signature, new_signature,
+	                                         old_path, new_path, delta_path);
 
-	if (!result.success) {
-		std::cerr << "Error generating delta: " << result.error_message << std::endl;
-		return 1;
+	if (!result) {
+		report("generating delta", result.error());
+		return exit_status_for(result.error().code);
 	}
 	return 0;
 }
@@ -56,15 +80,15 @@ int run_create(const char* old_path, const char* new_path, const char* delta_pat
 int run_apply(const char* old_path, const char* delta_path, const char* out_path)
 {
 	Apply<RKFinger, BLAKE2b> apply;
-	auto result = apply.apply_delta(old_path, delta_path, out_path);
+	const auto result = apply.apply_delta(old_path, delta_path, out_path);
 
-	if (!result.success) {
-		std::cerr << "Error applying delta: " << result.error_message << std::endl;
-		return 1;
+	if (!result) {
+		report("applying delta", result.error());
+		return exit_status_for(result.error().code);
 	}
 
-	std::cout << "Applied " << result.entries_processed << " entries, wrote "
-	          << result.bytes_written << " bytes to " << out_path << std::endl;
+	std::cout << "Applied " << result->entries_processed << " entries, wrote "
+	          << result->bytes_written << " bytes to " << out_path << std::endl;
 	return 0;
 }
 

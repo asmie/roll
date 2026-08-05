@@ -42,7 +42,7 @@ public:
 	* @return False if the path could not be opened, true otherwise (chunks may
 	*         still be empty for a zero-byte file).
 	*/
-	bool generate_signatures(const std::filesystem::path& datafile) {
+	[[nodiscard]] bool generate_signatures(const std::filesystem::path& datafile) {
 		FileIO file;
 		if (!file.open(datafile, FileMode::IN)) {
 			chunks.clear();
@@ -57,7 +57,7 @@ public:
 	* not closed by this call.
 	* @return False if `file` is not open, true otherwise.
 	*/
-	bool generate_signatures(FileIO& file) {
+	[[nodiscard]] bool generate_signatures(FileIO& file) {
 		chunks.clear();
 
 		if (!file.is_open())
@@ -143,7 +143,7 @@ public:
 	* Get chunk list.
 	* @return Vector of signed chunks.
 	*/
-	const std::vector<SignedChunk<typename T::RollingHashType>>& get_chunks() const noexcept {
+	[[nodiscard]] const std::vector<SignedChunk<typename T::RollingHashType>>& get_chunks() const noexcept {
 		return chunks;
 	}
 

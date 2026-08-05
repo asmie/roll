@@ -48,8 +48,21 @@ bool FileIO::open(const std::filesystem::path& file_path, FileMode mode)
 
 bool FileIO::close()
 {
+	discard_read_buffer();
+
+	if (!f_.is_open())
+		return true;  // nothing open: nothing could fail
+
+	// Report whether *this* close succeeded. Returning !fail() outright made a
+	// benign earlier read report failure, because a short read at EOF sets
+	// failbit — so a caller checking close() on a fully-consumed file would see
+	// a flush error that never happened. badbit is different: it marks a real
+	// stream error, so preserve it across the clear.
+	const bool had_stream_error = f_.bad();
+	f_.clear();
 	f_.close();
-	return !f_.fail();
+
+	return !f_.fail() && !had_stream_error;
 }
 
 bool FileIO::refill()

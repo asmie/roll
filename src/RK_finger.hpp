@@ -50,7 +50,7 @@ public:
 	* than window_size bytes are available, signalling that compute_next must
 	* not be called (no full window to roll).
 	*/
-	bool initialize(std::span<const uint8_t> initial) noexcept {
+	[[nodiscard]] bool initialize(std::span<const uint8_t> initial) noexcept {
 		fingerprint_ = 0;
 		window_head_ = 0;
 		const size_t n = initial.size() < window_size_ ? initial.size() : window_size_;
@@ -79,10 +79,10 @@ public:
 		return fingerprint_;
 	}
 
-	unsigned int get_alphabet_size() const noexcept { return alphabet_size_; }
-	unsigned int get_window_size() const noexcept { return window_size_; }
-	uint64_t get_modulus() const noexcept { return modulus_; }
-	uint64_t get_current_fingerprint() const noexcept { return fingerprint_; }
+	[[nodiscard]] unsigned int get_alphabet_size() const noexcept { return alphabet_size_; }
+	[[nodiscard]] unsigned int get_window_size() const noexcept { return window_size_; }
+	[[nodiscard]] uint64_t get_modulus() const noexcept { return modulus_; }
+	[[nodiscard]] uint64_t get_current_fingerprint() const noexcept { return fingerprint_; }
 
 private:
 	/**

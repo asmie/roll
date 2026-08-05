@@ -51,7 +51,7 @@ using ChunkMap = std::unordered_map<SignedChunk<T>, size_t, ChunkHash<T>, ChunkE
 * separately should pair this with find_unused_match().
 */
 template <class T>
-ChunkMap<T> build_chunk_map(const std::vector<SignedChunk<T>>& chunks) {
+[[nodiscard]] ChunkMap<T> build_chunk_map(const std::vector<SignedChunk<T>>& chunks) {
 	ChunkMap<T> map;
 	map.reserve(chunks.size());
 	for (size_t i = 0; i < chunks.size(); ++i)
@@ -74,7 +74,7 @@ ChunkMap<T> build_chunk_map(const std::vector<SignedChunk<T>>& chunks) {
 * @return True if an unused match was found.
 */
 template <class T>
-bool find_unused_match(const std::vector<SignedChunk<T>>& chunks,
+[[nodiscard]] bool find_unused_match(const std::vector<SignedChunk<T>>& chunks,
                        const std::vector<bool>& used,
                        const ChunkMap<T>& map,
                        const SignedChunk<T>& probe,

@@ -81,11 +81,11 @@ TEST(DeltaViewer, succeeds_on_well_formed_delta)
 	write_random(OLD, 4096, 0x1234u);
 	write_random(NEW, 4096, 0x5678u);
 	Signature<RKFinger, BLAKE2b> os, ns;
-	os.generate_signatures(OLD);
-	ns.generate_signatures(NEW);
+	ASSERT_TRUE(os.generate_signatures(OLD));
+	ASSERT_TRUE(ns.generate_signatures(NEW));
 	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
-	ASSERT_TRUE(dr.success);
+	ASSERT_TRUE(dr.has_value());
 
 	SilenceCout s;
 	EXPECT_EQ(view_delta(DELTA), 0);
@@ -110,11 +110,11 @@ TEST(DeltaViewer, rejects_bad_magic)
 	write_random(OLD, 4096, 0xAAu);
 	write_random(NEW, 4096, 0xBBu);
 	Signature<RKFinger, BLAKE2b> os, ns;
-	os.generate_signatures(OLD);
-	ns.generate_signatures(NEW);
+	ASSERT_TRUE(os.generate_signatures(OLD));
+	ASSERT_TRUE(ns.generate_signatures(NEW));
 	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
-	ASSERT_TRUE(dr.success);
+	ASSERT_TRUE(dr.has_value());
 
 	auto raw = read_all(DELTA);
 	raw[0] ^= 0xFF;
@@ -137,11 +137,11 @@ TEST(DeltaViewer, rejects_unknown_version)
 	write_random(OLD, 4096, 0xC1u);
 	write_random(NEW, 4096, 0xC2u);
 	Signature<RKFinger, BLAKE2b> os, ns;
-	os.generate_signatures(OLD);
-	ns.generate_signatures(NEW);
+	ASSERT_TRUE(os.generate_signatures(OLD));
+	ASSERT_TRUE(ns.generate_signatures(NEW));
 	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
-	ASSERT_TRUE(dr.success);
+	ASSERT_TRUE(dr.has_value());
 
 	// Bump the version field (BE u32 at offset 4) to a value we don't know.
 	auto raw = read_all(DELTA);

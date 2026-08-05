@@ -14,7 +14,8 @@ TEST(Signature, generate_signature_null)
 {
 	Signature<RKFinger, BLAKE2b> signatures;
 
-	signatures.generate_signatures("");
+	EXPECT_FALSE(signatures.generate_signatures(""))
+		<< "an unopenable path must report failure, not just produce no chunks";
 	auto chunks = signatures.get_chunks();
 	ASSERT_EQ(chunks.size(), 0);
 }
@@ -23,7 +24,8 @@ TEST(Signature, generate_signature_incorrect)
 {
 	Signature<RKFinger, BLAKE2b> signatures;
 
-	signatures.generate_signatures("non-existing-file");
+	EXPECT_FALSE(signatures.generate_signatures("non-existing-file"))
+		<< "a missing file must report failure, not just produce no chunks";
 	auto chunks = signatures.get_chunks();
 	ASSERT_EQ(chunks.size(), 0);
 }
@@ -99,8 +101,8 @@ TEST(Signature, small_file_under_window)
 	write_tmp(path, data);
 
 	Signature<RKFinger, BLAKE2b> a, b;
-	a.generate_signatures(path);
-	b.generate_signatures(path);
+	ASSERT_TRUE(a.generate_signatures(path));
+	ASSERT_TRUE(b.generate_signatures(path));
 
 	ASSERT_EQ(a.get_chunks().size(), 1u);
 	ASSERT_EQ(b.get_chunks().size(), 1u);
@@ -131,8 +133,8 @@ TEST(Signature, shift_invariance_resyncs_after_insertion)
 	write_tmp(p_shift, shifted);
 
 	Signature<RKFinger, BLAKE2b> a, b;
-	a.generate_signatures(p_data);
-	b.generate_signatures(p_shift);
+	ASSERT_TRUE(a.generate_signatures(p_data));
+	ASSERT_TRUE(b.generate_signatures(p_shift));
 
 	const auto& ca = a.get_chunks();
 	const auto& cb = b.get_chunks();
@@ -172,11 +174,11 @@ TEST(Signature, regenerate_replaces_previous_chunks)
 	write_tmp(p2, b);
 
 	Signature<RKFinger, BLAKE2b> sig;
-	sig.generate_signatures(p1);
+	ASSERT_TRUE(sig.generate_signatures(p1));
 	const size_t first_count = sig.get_chunks().size();
 	ASSERT_GT(first_count, 0u);
 
-	sig.generate_signatures(p2);
+	ASSERT_TRUE(sig.generate_signatures(p2));
 	ASSERT_EQ(sig.get_chunks().size(), 1u);
 	EXPECT_EQ(sig.get_chunks()[0].chunk_size, b.size());
 
@@ -198,8 +200,8 @@ TEST(Signature, small_file_distinct_signatures)
 	write_tmp(p2, b);
 
 	Signature<RKFinger, BLAKE2b> sa, sb;
-	sa.generate_signatures(p1);
-	sb.generate_signatures(p2);
+	ASSERT_TRUE(sa.generate_signatures(p1));
+	ASSERT_TRUE(sb.generate_signatures(p2));
 
 	ASSERT_EQ(sa.get_chunks().size(), 1u);
 	ASSERT_EQ(sb.get_chunks().size(), 1u);

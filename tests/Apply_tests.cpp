@@ -105,20 +105,26 @@ bool roundtrip(const std::string& old_path, const std::string& new_path,
                std::string* err = nullptr)
 {
 	Signature<RKFinger, BLAKE2b> old_sig, new_sig;
-	old_sig.generate_signatures(old_path);
-	new_sig.generate_signatures(new_path);
+	if (!old_sig.generate_signatures(old_path)) {
+		if (err) *err = "signature: cannot read " + old_path;
+		return false;
+	}
+	if (!new_sig.generate_signatures(new_path)) {
+		if (err) *err = "signature: cannot read " + new_path;
+		return false;
+	}
 
 	Delta<RKFinger, BLAKE2b> delta;
 	auto dr = delta.generate_delta(old_sig, new_sig, old_path, new_path, delta_path);
-	if (!dr.success) {
-		if (err) *err = "delta: " + dr.error_message;
+	if (!dr.has_value()) {
+		if (err) *err = "delta: " + dr.error().message;
 		return false;
 	}
 
 	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(old_path, delta_path, out_path);
-	if (!ar.success) {
-		if (err) *err = "apply: " + ar.error_message;
+	if (!ar.has_value()) {
+		if (err) *err = "apply: " + ar.error().message;
 		return false;
 	}
 	return true;
@@ -343,11 +349,11 @@ TEST(Apply, truncated_added_payload_fails)
 	write_random(NEW, 4096, 0x123456u);
 
 	Signature<RKFinger, BLAKE2b> os, ns;
-	os.generate_signatures(OLD);
-	ns.generate_signatures(NEW);
+	ASSERT_TRUE(os.generate_signatures(OLD));
+	ASSERT_TRUE(ns.generate_signatures(NEW));
 	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
-	ASSERT_TRUE(dr.success);
+	ASSERT_TRUE(dr.has_value());
 
 	// Drop a single byte: with a non-empty new file the last entry's payload
 	// is always >= 1 byte, so this always lands mid-payload regardless of the
@@ -359,7 +365,7 @@ TEST(Apply, truncated_added_payload_fails)
 
 	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
-	EXPECT_FALSE(ar.success);
+	EXPECT_FALSE(ar.has_value());
 
 	cleanup({OLD, NEW, DELTA, OUT});
 }
@@ -385,11 +391,11 @@ TEST(Apply, truncated_modified_after_header_fails)
 	write_bytes(NEW, modified);
 
 	Signature<RKFinger, BLAKE2b> os, ns;
-	os.generate_signatures(OLD);
-	ns.generate_signatures(NEW);
+	ASSERT_TRUE(os.generate_signatures(OLD));
+	ASSERT_TRUE(ns.generate_signatures(NEW));
 	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
-	ASSERT_TRUE(dr.success);
+	ASSERT_TRUE(dr.has_value());
 
 	const size_t header_size = entry_header_size();
 	auto raw = read_all(DELTA);
@@ -399,7 +405,7 @@ TEST(Apply, truncated_modified_after_header_fails)
 
 	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
-	EXPECT_FALSE(ar.success);
+	EXPECT_FALSE(ar.has_value());
 
 	cleanup({OLD, NEW, DELTA, OUT});
 }
@@ -426,11 +432,11 @@ TEST(Apply, truncated_modified_at_opcode_boundary_fails)
 	write_bytes(NEW, modified);
 
 	Signature<RKFinger, BLAKE2b> os, ns;
-	os.generate_signatures(OLD);
-	ns.generate_signatures(NEW);
+	ASSERT_TRUE(os.generate_signatures(OLD));
+	ASSERT_TRUE(ns.generate_signatures(NEW));
 	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
-	ASSERT_TRUE(dr.success);
+	ASSERT_TRUE(dr.has_value());
 
 	// Truncate after the first 'D' opcode (count=1) but before the second.
 	const size_t cut = entry_header_size() + d_opcode_size(1);
@@ -441,7 +447,7 @@ TEST(Apply, truncated_modified_at_opcode_boundary_fails)
 
 	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
-	EXPECT_FALSE(ar.success);
+	EXPECT_FALSE(ar.has_value());
 
 	cleanup({OLD, NEW, DELTA, OUT});
 }
@@ -456,17 +462,17 @@ TEST(Apply, rejects_output_aliasing_old)
 	write_random(NEW, 4096, 0xA2u);
 
 	Signature<RKFinger, BLAKE2b> os, ns;
-	os.generate_signatures(OLD);
-	ns.generate_signatures(NEW);
+	ASSERT_TRUE(os.generate_signatures(OLD));
+	ASSERT_TRUE(ns.generate_signatures(NEW));
 	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
-	ASSERT_TRUE(dr.success);
+	ASSERT_TRUE(dr.has_value());
 
 	auto old_before = read_all(OLD);
 
 	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OLD);  // output == old
-	EXPECT_FALSE(ar.success);
+	EXPECT_FALSE(ar.has_value());
 
 	// Old file must be untouched: aliased open would have truncated it.
 	EXPECT_EQ(read_all(OLD), old_before);
@@ -484,17 +490,17 @@ TEST(Apply, rejects_output_aliasing_delta)
 	write_random(NEW, 4096, 0xB2u);
 
 	Signature<RKFinger, BLAKE2b> os, ns;
-	os.generate_signatures(OLD);
-	ns.generate_signatures(NEW);
+	ASSERT_TRUE(os.generate_signatures(OLD));
+	ASSERT_TRUE(ns.generate_signatures(NEW));
 	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
-	ASSERT_TRUE(dr.success);
+	ASSERT_TRUE(dr.has_value());
 
 	auto delta_before = read_all(DELTA);
 
 	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, DELTA);  // output == delta
-	EXPECT_FALSE(ar.success);
+	EXPECT_FALSE(ar.has_value());
 
 	// Delta file must be untouched: aliased open would have truncated it,
 	// after which the apply loop would see EOF and report success silently.
@@ -519,11 +525,11 @@ TEST(Apply, duplicate_removed_entry_rejected)
 	write_bytes(NEW, {});
 
 	Signature<RKFinger, BLAKE2b> os, ns;
-	os.generate_signatures(OLD);
-	ns.generate_signatures(NEW);
+	ASSERT_TRUE(os.generate_signatures(OLD));
+	ASSERT_TRUE(ns.generate_signatures(NEW));
 	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
-	ASSERT_TRUE(dr.success);
+	ASSERT_TRUE(dr.has_value());
 
 	const size_t header_size = entry_header_size();
 	constexpr size_t trailer_size = 1 + BLAKE2b::HASH_SIZE;
@@ -537,7 +543,7 @@ TEST(Apply, duplicate_removed_entry_rejected)
 
 	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
-	EXPECT_FALSE(ar.success);
+	EXPECT_FALSE(ar.has_value());
 
 	cleanup({OLD, NEW, DELTA, OUT});
 }
@@ -561,11 +567,11 @@ TEST(Apply, rejects_mutated_old_between_create_and_apply)
 	write_bytes(NEW, modified);
 
 	Signature<RKFinger, BLAKE2b> os, ns;
-	os.generate_signatures(OLD);
-	ns.generate_signatures(NEW);
+	ASSERT_TRUE(os.generate_signatures(OLD));
+	ASSERT_TRUE(ns.generate_signatures(NEW));
 	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
-	ASSERT_TRUE(dr.success);
+	ASSERT_TRUE(dr.has_value());
 
 	// Tamper with the OLD file after the delta is produced.
 	auto tampered = base;
@@ -574,7 +580,7 @@ TEST(Apply, rejects_mutated_old_between_create_and_apply)
 
 	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
-	EXPECT_FALSE(ar.success);
+	EXPECT_FALSE(ar.has_value());
 
 	cleanup({OLD, NEW, DELTA, OUT});
 }
@@ -593,11 +599,11 @@ TEST(Apply, rejects_corrupted_original_hash)
 	write_random(NEW, 32 * 1024, 0x55u);  // same seed -> identical content
 
 	Signature<RKFinger, BLAKE2b> os, ns;
-	os.generate_signatures(OLD);
-	ns.generate_signatures(NEW);
+	ASSERT_TRUE(os.generate_signatures(OLD));
+	ASSERT_TRUE(ns.generate_signatures(NEW));
 	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
-	ASSERT_TRUE(dr.success);
+	ASSERT_TRUE(dr.has_value());
 
 	// Header (8) + entry_type (8) + signature (8) lands us at the hash bytes.
 	auto raw = read_all(DELTA);
@@ -608,7 +614,7 @@ TEST(Apply, rejects_corrupted_original_hash)
 
 	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
-	EXPECT_FALSE(ar.success);
+	EXPECT_FALSE(ar.has_value());
 
 	cleanup({OLD, NEW, DELTA, OUT});
 }
@@ -624,11 +630,11 @@ TEST(Apply, failed_apply_removes_output_stub)
 	write_random(NEW, 2048, 0xE2u);
 
 	Signature<RKFinger, BLAKE2b> os, ns;
-	os.generate_signatures(OLD);
-	ns.generate_signatures(NEW);
+	ASSERT_TRUE(os.generate_signatures(OLD));
+	ASSERT_TRUE(ns.generate_signatures(NEW));
 	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
-	ASSERT_TRUE(dr.success);
+	ASSERT_TRUE(dr.has_value());
 
 	// Corrupt the header so apply fails after creating the output file.
 	auto raw = read_all(DELTA);
@@ -637,7 +643,7 @@ TEST(Apply, failed_apply_removes_output_stub)
 
 	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
-	EXPECT_FALSE(ar.success);
+	EXPECT_FALSE(ar.has_value());
 	EXPECT_FALSE(std::filesystem::exists(OUT))
 		<< "output stub was left on disk after a failed apply";
 
@@ -655,11 +661,11 @@ TEST(Apply, rejects_bad_magic)
 	write_random(NEW, 4096, 0xD2u);
 
 	Signature<RKFinger, BLAKE2b> os, ns;
-	os.generate_signatures(OLD);
-	ns.generate_signatures(NEW);
+	ASSERT_TRUE(os.generate_signatures(OLD));
+	ASSERT_TRUE(ns.generate_signatures(NEW));
 	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
-	ASSERT_TRUE(dr.success);
+	ASSERT_TRUE(dr.has_value());
 
 	auto raw = read_all(DELTA);
 	ASSERT_GE(raw.size(), 4u);
@@ -668,7 +674,7 @@ TEST(Apply, rejects_bad_magic)
 
 	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
-	EXPECT_FALSE(ar.success);
+	EXPECT_FALSE(ar.has_value());
 
 	cleanup({OLD, NEW, DELTA, OUT});
 }
@@ -686,11 +692,11 @@ TEST(Apply, truncated_partial_header_fails)
 	write_bytes(NEW, {});
 
 	Signature<RKFinger, BLAKE2b> os, ns;
-	os.generate_signatures(OLD);
-	ns.generate_signatures(NEW);
+	ASSERT_TRUE(os.generate_signatures(OLD));
+	ASSERT_TRUE(ns.generate_signatures(NEW));
 	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
-	ASSERT_TRUE(dr.success);
+	ASSERT_TRUE(dr.has_value());
 
 	auto raw = read_all(DELTA);
 	constexpr size_t trailer_size = 1 + BLAKE2b::HASH_SIZE;
@@ -703,7 +709,7 @@ TEST(Apply, truncated_partial_header_fails)
 
 	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
-	EXPECT_FALSE(ar.success);
+	EXPECT_FALSE(ar.has_value());
 
 	cleanup({OLD, NEW, DELTA, OUT});
 }
@@ -719,11 +725,11 @@ TEST(Apply, rejects_missing_trailer)
 	write_random(NEW, 4096, 0xA1u);
 
 	Signature<RKFinger, BLAKE2b> os, ns;
-	os.generate_signatures(OLD);
-	ns.generate_signatures(NEW);
+	ASSERT_TRUE(os.generate_signatures(OLD));
+	ASSERT_TRUE(ns.generate_signatures(NEW));
 	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
-	ASSERT_TRUE(dr.success);
+	ASSERT_TRUE(dr.has_value());
 
 	// Strip the trailer (1 tag + hash_size).
 	auto raw = read_all(DELTA);
@@ -737,7 +743,7 @@ TEST(Apply, rejects_missing_trailer)
 
 	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
-	EXPECT_FALSE(ar.success);
+	EXPECT_FALSE(ar.has_value());
 
 	cleanup({OLD, NEW, DELTA, OUT});
 }
@@ -753,11 +759,11 @@ TEST(Apply, rejects_corrupted_whole_file_trailer)
 	write_random(NEW, 4096, 0xA3u);
 
 	Signature<RKFinger, BLAKE2b> os, ns;
-	os.generate_signatures(OLD);
-	ns.generate_signatures(NEW);
+	ASSERT_TRUE(os.generate_signatures(OLD));
+	ASSERT_TRUE(ns.generate_signatures(NEW));
 	Delta<RKFinger, BLAKE2b> d;
 	auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
-	ASSERT_TRUE(dr.success);
+	ASSERT_TRUE(dr.has_value());
 
 	// Flip a byte inside the trailer hash.
 	auto raw = read_all(DELTA);
@@ -766,7 +772,7 @@ TEST(Apply, rejects_corrupted_whole_file_trailer)
 
 	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
-	EXPECT_FALSE(ar.success);
+	EXPECT_FALSE(ar.has_value());
 
 	cleanup({OLD, NEW, DELTA, OUT});
 }
@@ -785,9 +791,9 @@ TEST(Apply, rejects_oversized_added_chunk_size)
 
 	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
-	EXPECT_FALSE(ar.success);
-	EXPECT_NE(ar.error_message.find("out-of-range chunk size"), std::string::npos)
-		<< "actual: " << ar.error_message;
+	EXPECT_FALSE(ar.has_value());
+	EXPECT_NE(ar.error().message.find("out-of-range chunk size"), std::string::npos)
+		<< "actual: " << ar.error().message;
 	EXPECT_FALSE(std::filesystem::exists(OUT))
 		<< "output stub was left on disk after a rejected delta";
 
@@ -806,9 +812,9 @@ TEST(Apply, rejects_oversized_modified_chunk_size)
 
 	Apply<RKFinger, BLAKE2b> apply;
 	auto ar = apply.apply_delta(OLD, DELTA, OUT);
-	EXPECT_FALSE(ar.success);
-	EXPECT_NE(ar.error_message.find("out-of-range chunk size"), std::string::npos)
-		<< "actual: " << ar.error_message;
+	EXPECT_FALSE(ar.has_value());
+	EXPECT_NE(ar.error().message.find("out-of-range chunk size"), std::string::npos)
+		<< "actual: " << ar.error().message;
 	EXPECT_FALSE(std::filesystem::exists(OUT));
 
 	cleanup({OLD, DELTA, OUT});
@@ -828,17 +834,108 @@ TEST(Apply, chunk_size_bound_is_exact)
 	write_bytes(DELTA, crafted_delta(EntryType::ADDED_CHUNK, DELTA_MAX_CHUNK_SIZE + 1));
 	Apply<RKFinger, BLAKE2b> over;
 	auto over_result = over.apply_delta(OLD, DELTA, OUT);
-	EXPECT_FALSE(over_result.success);
-	EXPECT_NE(over_result.error_message.find("out-of-range chunk size"), std::string::npos)
-		<< "actual: " << over_result.error_message;
+	EXPECT_FALSE(over_result.has_value());
+	EXPECT_NE(over_result.error().message.find("out-of-range chunk size"), std::string::npos)
+		<< "actual: " << over_result.error().message;
 
 	write_bytes(DELTA, crafted_delta(EntryType::ADDED_CHUNK, DELTA_MAX_CHUNK_SIZE));
 	Apply<RKFinger, BLAKE2b> at_max;
 	auto at_max_result = at_max.apply_delta(OLD, DELTA, OUT);
-	EXPECT_FALSE(at_max_result.success);
-	EXPECT_EQ(at_max_result.error_message.find("out-of-range chunk size"), std::string::npos)
+	EXPECT_FALSE(at_max_result.has_value());
+	EXPECT_EQ(at_max_result.error().message.find("out-of-range chunk size"), std::string::npos)
 		<< "the maximum legal chunk size must not be rejected for its size: "
-		<< at_max_result.error_message;
+		<< at_max_result.error().message;
 
 	cleanup({OLD, DELTA, OUT});
+}
+
+// The failure category is the point of returning std::expected over a bool:
+// callers (and these tests) can react to a kind of failure without matching on
+// message text, which would make every reworded message a test change.
+TEST(Apply, failure_categories_distinguish_causes)
+{
+	const std::string OLD = tpath("apply_t_cat_old");
+	const std::string NEW = tpath("apply_t_cat_new");
+	const std::string DELTA = tpath("apply_t_cat_delta");
+	const std::string OUT = tpath("apply_t_cat_out");
+
+	write_random(OLD, 4096, 0xCA71u);
+	write_random(NEW, 4096, 0xCA72u);
+
+	Signature<RKFinger, BLAKE2b> os, ns;
+	ASSERT_TRUE(os.generate_signatures(OLD));
+	ASSERT_TRUE(ns.generate_signatures(NEW));
+	Delta<RKFinger, BLAKE2b> d;
+	ASSERT_TRUE(d.generate_delta(os, ns, OLD, NEW, DELTA).has_value());
+	const auto good_delta = read_all(DELTA);
+
+	Apply<RKFinger, BLAKE2b> apply;
+
+	// A missing input is an environment problem, not a malformed delta.
+	{
+		const auto r = apply.apply_delta(tpath("apply_t_cat_absent"), DELTA, OUT);
+		ASSERT_FALSE(r.has_value());
+		EXPECT_EQ(r.error().code, DeltaErrc::io_error) << r.error().message;
+	}
+
+	// Corrupt magic is a malformed stream.
+	{
+		auto raw = good_delta;
+		raw[0] ^= 0xFF;
+		write_bytes(DELTA, raw);
+		const auto r = apply.apply_delta(OLD, DELTA, OUT);
+		ASSERT_FALSE(r.has_value());
+		EXPECT_EQ(r.error().code, DeltaErrc::corrupt_delta) << r.error().message;
+	}
+
+	// A flipped bit inside the whole-file trailer is an integrity failure.
+	{
+		auto raw = good_delta;
+		raw.back() ^= 0xFF;
+		write_bytes(DELTA, raw);
+		const auto r = apply.apply_delta(OLD, DELTA, OUT);
+		ASSERT_FALSE(r.has_value());
+		EXPECT_EQ(r.error().code, DeltaErrc::integrity_mismatch) << r.error().message;
+	}
+
+	// Aliasing the output onto an input is a caller mistake.
+	{
+		write_bytes(DELTA, good_delta);
+		const auto r = apply.apply_delta(OLD, DELTA, OLD);
+		ASSERT_FALSE(r.has_value());
+		EXPECT_EQ(r.error().code, DeltaErrc::invalid_argument) << r.error().message;
+	}
+
+	cleanup({OLD, NEW, DELTA, OUT});
+}
+
+// Statistics are reachable only through a successful result, so a failed run can
+// no longer be misread as having written bytes.
+TEST(Apply, success_carries_statistics)
+{
+	const std::string OLD = tpath("apply_t_stats_old");
+	const std::string NEW = tpath("apply_t_stats_new");
+	const std::string DELTA = tpath("apply_t_stats_delta");
+	const std::string OUT = tpath("apply_t_stats_out");
+
+	write_random(OLD, 8192, 0x5747u);
+	write_random(NEW, 8192, 0x5748u);
+
+	Signature<RKFinger, BLAKE2b> os, ns;
+	ASSERT_TRUE(os.generate_signatures(OLD));
+	ASSERT_TRUE(ns.generate_signatures(NEW));
+	Delta<RKFinger, BLAKE2b> d;
+	const auto dr = d.generate_delta(os, ns, OLD, NEW, DELTA);
+	ASSERT_TRUE(dr.has_value()) << dr.error().message;
+	EXPECT_GT(dr->chunks_processed, 0u);
+	EXPECT_EQ(dr->bytes_written, read_all(DELTA).size())
+		<< "reported bytes must match the delta actually written";
+
+	Apply<RKFinger, BLAKE2b> apply;
+	const auto ar = apply.apply_delta(OLD, DELTA, OUT);
+	ASSERT_TRUE(ar.has_value()) << ar.error().message;
+	EXPECT_GT(ar->entries_processed, 0u);
+	EXPECT_EQ(ar->bytes_written, read_all(NEW).size());
+
+	cleanup({OLD, NEW, DELTA, OUT});
 }

@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 #define TEST_STR "This is the test file\n"
 
@@ -40,7 +41,7 @@ TEST(FileIO, open_close)
 	prepare_file(path);
 
 	EXPECT_TRUE(fio.open(path, FileMode::INOUT));
-	fio.close();
+	EXPECT_TRUE(fio.close());
 
 	remove_file(path);
 }
@@ -55,7 +56,7 @@ TEST(FileIO, is_open)
 	EXPECT_TRUE(fio.open(path, FileMode::INOUT));
 	EXPECT_TRUE(fio.is_open());
 
-	fio.close();
+	EXPECT_TRUE(fio.close());
 	remove_file(path);
 }
 
@@ -69,10 +70,12 @@ TEST(FileIO, is_eof)
 	EXPECT_TRUE(fio.open(path, FileMode::INOUT));
 	EXPECT_FALSE(fio.is_eof());
 
-	fio.read_chunk(200);
+	// Asking for more than the file holds returns what there was, and leaves the
+	// handle at end of file.
+	EXPECT_EQ(fio.read_chunk(200).size(), std::filesystem::file_size(path));
 	EXPECT_TRUE(fio.is_eof());
 
-	fio.close();
+	EXPECT_TRUE(fio.close());
 	remove_file(path);
 }
 
@@ -80,7 +83,7 @@ TEST(FileIO, open_non_existing)
 {
 	FileIO fio;
 	EXPECT_FALSE(fio.open("non-existing_file_xyzzy_roll_test", FileMode::INOUT));
-	fio.close();
+	EXPECT_TRUE(fio.close());
 }
 
 TEST(FileIO, read)
@@ -96,7 +99,7 @@ TEST(FileIO, read)
 	const std::string read_back(buf.begin(), buf.end());
 	EXPECT_EQ(read_back, std::string(TEST_STR));
 
-	fio.close();
+	EXPECT_TRUE(fio.close());
 	remove_file(path);
 }
 
@@ -121,7 +124,7 @@ TEST(FileIO, read_incorrect)
 	buf = fio.read_chunk(100);
 	EXPECT_EQ(buf.size(), 0u);
 
-	fio.close();
+	EXPECT_TRUE(fio.close());
 	remove_file(path);
 }
 
@@ -143,7 +146,7 @@ TEST(FileIO, read_byte_and_peek_byte_sequence)
 	EXPECT_EQ(fio.read_byte(), peeked);
 	EXPECT_EQ(fio.read_byte(), static_cast<int>('h'));
 
-	fio.close();
+	EXPECT_TRUE(fio.close());
 	remove_file(path);
 }
 
@@ -165,7 +168,7 @@ TEST(FileIO, read_byte_reaches_eof_exactly_once)
 	EXPECT_EQ(fio.read_byte(), EOF) << "reads past EOF must keep returning EOF";
 	EXPECT_EQ(fio.peek_byte(), EOF);
 
-	fio.close();
+	EXPECT_TRUE(fio.close());
 	remove_file(path);
 }
 
@@ -196,7 +199,7 @@ TEST(FileIO, byte_and_chunk_reads_interleave)
 		++remaining;
 	EXPECT_EQ(remaining + 7, expected);
 
-	fio.close();
+	EXPECT_TRUE(fio.close());
 	remove_file(path);
 }
 
@@ -218,7 +221,7 @@ TEST(FileIO, positioned_read_after_byte_reads)
 
 	EXPECT_EQ(fio.read_byte(), static_cast<int>(TEST_STR[12]));
 
-	fio.close();
+	EXPECT_TRUE(fio.close());
 	remove_file(path);
 }
 
@@ -245,6 +248,46 @@ TEST(FileIO, byte_reads_span_multiple_refills)
 	}
 	EXPECT_EQ(fio.read_byte(), EOF);
 
-	fio.close();
+	EXPECT_TRUE(fio.close());
+	remove_file(path);
+}
+
+// close() must report whether the close itself succeeded. It used to return
+// !fail() outright, so a file read to completion reported a close failure —
+// a short read at EOF sets failbit — which made the result useless to callers
+// checking for flush errors.
+TEST(FileIO, close_succeeds_after_reading_to_eof)
+{
+	FileIO fio;
+	const auto path = make_test_path();
+	prepare_file(path);
+
+	ASSERT_TRUE(fio.open(path, FileMode::IN));
+	while (fio.read_byte() != EOF) { }
+	ASSERT_TRUE(fio.is_eof());
+
+	EXPECT_TRUE(fio.close())
+		<< "a benign end-of-file must not be reported as a close failure";
+
+	remove_file(path);
+}
+
+TEST(FileIO, close_on_an_unopened_handle_succeeds)
+{
+	FileIO fio;
+	EXPECT_TRUE(fio.close()) << "nothing was open, so nothing could fail";
+}
+
+TEST(FileIO, close_reports_success_after_writing)
+{
+	FileIO fio;
+	const auto path = make_test_path();
+
+	ASSERT_TRUE(fio.open(path, FileMode::OUT));
+	const std::vector<uint8_t> payload{1, 2, 3, 4};
+	ASSERT_TRUE(fio.write_chunk(payload));
+	EXPECT_TRUE(fio.close()) << "a clean flush must report success";
+
+	EXPECT_EQ(std::filesystem::file_size(path), payload.size());
 	remove_file(path);
 }

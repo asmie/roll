@@ -51,8 +51,9 @@ include(CheckCXXSourceCompiles)
 # Headers used by the production sources.
 foreach(_h
         algorithm atomic bit cctype climits concepts cstddef cstdint cstdio
-        cstdlib cstring filesystem fstream iomanip iostream limits span sstream
-        stdexcept string string_view system_error unordered_map utility vector)
+        cstdlib cstring expected filesystem fstream functional iomanip iostream
+        limits span sstream stdexcept string string_view system_error type_traits
+        unordered_map utility vector)
     string(TOUPPER "${_h}" _H)
     check_include_file_cxx(${_h} RH_HAVE_${_H})
 endforeach()
@@ -96,6 +97,16 @@ check_cxx_source_compiles("
     enum class E { X };
     int main() { return static_cast<int>(std::to_underlying(E::X)); }
 " RH_HAVE_STD_TO_UNDERLYING)
+
+check_cxx_source_compiles("
+    #include <expected>
+    #include <string>
+    int main() {
+        std::expected<int, std::string> ok{1};
+        std::expected<int, std::string> bad{std::unexpected(std::string(\"e\"))};
+        return ok.has_value() && !bad.has_value() ? 0 : 1;
+    }
+" RH_HAVE_STD_EXPECTED)
 
 check_cxx_source_compiles("
     #include <concepts>

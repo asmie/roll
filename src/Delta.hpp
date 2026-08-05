@@ -3,12 +3,14 @@
 
 #include "ChunkIndex.hpp"
 #include "DeltaCodec.hpp"
+#include "DeltaError.hpp"
 #include "DeltaFormat.hpp"
 #include "Signature.hpp"
 #include "FileIO.hpp"
 
 #include <algorithm>
 #include <cstddef>
+#include <expected>
 #include <cstdint>
 #include <filesystem>
 #include <span>
@@ -35,74 +37,69 @@ template<RollingHashAlgorithm T, StrongHashAlgorithm U>
 class Delta {
 public:
     /**
-    * Result of delta generation with error handling
-    */
-    struct Result {
-        bool success;
-        std::string error_message;
-        size_t chunks_processed;
-        size_t bytes_written;
-    };
-
-    /**
     * Generates delta between two files with optimized algorithm.
     * @param[in] original original file signatures
     * @param[in] newfile new file signatures
     * @param[in] oldfile old file path
     * @param[in] file_to_check new file path
     * @param[in] delta_file delta file path
-    * @return Result structure with success status, error message, and statistics
+    * @return Statistics on success, or the failure that stopped generation.
     */
-    Result generate_delta(const Signature<T, U>& original,
+    [[nodiscard]] std::expected<DeltaStats, DeltaError>
+    generate_delta(const Signature<T, U>& original,
                          const Signature<T, U>& newfile,
                          const std::filesystem::path& oldfile,
                          const std::filesystem::path& file_to_check,
                          const std::filesystem::path& delta_file)
     {
-        Result result{false, "", 0, 0};
+        Progress progress;
 
-        // Open files with error checking
         FileIO old, file, delta;
-        if (!openFiles(old, file, delta, oldfile, file_to_check, delta_file, result)) {
-            return result;
-        }
+        if (!openFiles(old, file, delta, oldfile, file_to_check, delta_file, progress))
+            return std::unexpected(std::move(progress.error));
 
         DeltaWriter writer(delta);
-        if (!writer.write_header()) {
-            result.error_message = writer.error();
-            return result;
-        }
+        if (!writer.write_header())
+            return std::unexpected(DeltaError{DeltaErrc::io_error, writer.error()});
 
         const auto& original_chunks = original.get_chunks();
         const auto& new_chunks = newfile.get_chunks();
 
         auto chunk_map = build_chunk_map(original_chunks);
         bool ok = processMultipleChunks(original_chunks, new_chunks, chunk_map,
-                                        old, file, writer, result);
+                                        old, file, writer, progress);
 
         if (ok)
-            ok = writeTrailer(file, writer, result);
+            ok = writeTrailer(file, writer, progress);
 
-        result.bytes_written = writer.bytes_written();
+        // Reads need no flush, so only the delta's close can fail meaningfully.
+        (void) old.close();
+        (void) file.close();
+        if (!delta.close())
+            return std::unexpected(DeltaError{DeltaErrc::io_error,
+                                              "Failed to flush delta file"});
 
-        old.close();
-        file.close();
-        if (!delta.close()) {
-            result.error_message = "Failed to flush delta file";
-            return result;
-        }
+        if (!ok)
+            return std::unexpected(std::move(progress.error));
 
-        result.success = ok;
-        return result;
+        return DeltaStats{progress.chunks_processed, writer.bytes_written()};
     }
 
 private:
+    // Internal bookkeeping threaded through the generation helpers. Kept
+    // separate from the public std::expected so the helpers can keep reporting
+    // failure with a bool and filling in an error as they go.
+    struct Progress {
+        size_t chunks_processed { 0 };
+        DeltaError error;
+    };
+
     using ChunkMap = ::ChunkMap<typename T::RollingHashType>;
 
     // Stream-hash the entire new-file content in fixed-size buffers and emit
     // (DELTA_TRAILER_TAG | hash) so the applier can verify end-to-end
     // reconstruction, not just per-chunk hashes.
-    bool writeTrailer(FileIO& file, DeltaWriter& writer, Result& result) {
+    bool writeTrailer(FileIO& file, DeltaWriter& writer, Progress& progress) {
         U hash_func;
         hash_func.init();
 
@@ -117,7 +114,7 @@ private:
         hash_func.finalize(digest);
 
         if (!writer.write_trailer(digest)) {
-            result.error_message = writer.error();
+            progress.error = DeltaError{DeltaErrc::io_error, writer.error()};
             return false;
         }
         return true;
@@ -128,17 +125,20 @@ private:
     */
     bool openFiles(FileIO& old, FileIO& file, FileIO& delta,
                    const std::filesystem::path& oldfile, const std::filesystem::path& file_to_check,
-                   const std::filesystem::path& delta_file, Result& result) {
+                   const std::filesystem::path& delta_file, Progress& progress) {
         if (!old.open(oldfile, FileMode::IN)) {
-            result.error_message = "Failed to open old file: " + oldfile.string();
+            progress.error = DeltaError{DeltaErrc::io_error,
+                                        "Failed to open old file: " + oldfile.string()};
             return false;
         }
         if (!file.open(file_to_check, FileMode::IN)) {
-            result.error_message = "Failed to open new file: " + file_to_check.string();
+            progress.error = DeltaError{DeltaErrc::io_error,
+                                        "Failed to open new file: " + file_to_check.string()};
             return false;
         }
         if (!delta.open(delta_file, FileMode::OUT)) {
-            result.error_message = "Failed to create delta file: " + delta_file.string();
+            progress.error = DeltaError{DeltaErrc::io_error,
+                                        "Failed to create delta file: " + delta_file.string()};
             return false;
         }
         return true;
@@ -152,7 +152,7 @@ private:
     bool processMultipleChunks(const std::vector<SignedChunk<typename T::RollingHashType>>& original_chunks,
                                const std::vector<SignedChunk<typename T::RollingHashType>>& new_chunks,
                                const ChunkMap& chunk_map,
-                               FileIO& old, FileIO& file, DeltaWriter& writer, Result& result) {
+                               FileIO& old, FileIO& file, DeltaWriter& writer, Progress& progress) {
         std::vector<bool> original_used(original_chunks.size(), false);
 
         for (size_t i = 0; i < new_chunks.size(); ++i) {
@@ -164,8 +164,8 @@ private:
                 entry.type = EntryType::ORIGINAL_CHUNK;
                 entry.chunk_data = original_chunks[i];
                 original_used[i] = true;
-                if (!writeDeltaEntry(writer, entry, result)) return false;
-                result.chunks_processed++;
+                if (!writeDeltaEntry(writer, entry, progress)) return false;
+                progress.chunks_processed++;
                 continue;
             }
 
@@ -175,8 +175,8 @@ private:
                 entry.type = EntryType::ORIGINAL_CHUNK;
                 entry.chunk_data = new_chunks[i];
                 original_used[it->second] = true;
-                if (!writeDeltaEntry(writer, entry, result)) return false;
-                result.chunks_processed++;
+                if (!writeDeltaEntry(writer, entry, progress)) return false;
+                progress.chunks_processed++;
                 continue;
             }
 
@@ -206,8 +206,8 @@ private:
                                                        entry.chunk_data.start_offset);
             }
 
-            if (!writeDeltaEntry(writer, entry, result)) return false;
-            result.chunks_processed++;
+            if (!writeDeltaEntry(writer, entry, progress)) return false;
+            progress.chunks_processed++;
         }
 
         // Removed chunks: any old chunk not consumed above.
@@ -216,8 +216,8 @@ private:
                 DeltaEntry<typename T::RollingHashType> entry;
                 entry.type = EntryType::REMOVED_CHUNK;
                 entry.chunk_data = original_chunks[i];
-                if (!writeDeltaEntry(writer, entry, result)) return false;
-                result.chunks_processed++;
+                if (!writeDeltaEntry(writer, entry, progress)) return false;
+                progress.chunks_processed++;
             }
         }
         return true;
@@ -455,7 +455,7 @@ private:
     * Write one delta entry. The byte layout lives in DeltaCodec.
     */
     bool writeDeltaEntry(DeltaWriter& writer, const DeltaEntry<typename T::RollingHashType>& entry,
-                        Result& result) {
+                        Progress& progress) {
         const bool has_payload = entry.type == EntryType::ADDED_CHUNK ||
                                  entry.type == EntryType::MODIFIED_CHUNK;
         const auto payload = has_payload
@@ -465,7 +465,7 @@ private:
         if (!writer.write_entry(entry.type, entry.chunk_data.signature,
                                 entry.chunk_data.hash, entry.chunk_data.chunk_size,
                                 payload)) {
-            result.error_message = writer.error();
+            progress.error = DeltaError{DeltaErrc::io_error, writer.error()};
             return false;
         }
         return true;
