@@ -1054,3 +1054,35 @@ TEST(Apply, repeated_content_is_reused_rather_than_resent)
 
 	cleanup({OLD, NEW, DELTA, OUT});
 }
+
+// Chunks with unrelated content must not pay for an exhaustive diff search:
+// the Myers pass abandons early on noise-similar input and the literal guard
+// ships the chunk as ADDED. This pins the outcome (representation and bounded
+// size); the time saved is measured end-to-end rather than asserted here.
+TEST(Apply, unrelated_content_becomes_a_bounded_literal)
+{
+	const std::string OLD = tpath("apply_t_unrel_old");
+	const std::string NEW = tpath("apply_t_unrel_new");
+	const std::string DELTA = tpath("apply_t_unrel_delta");
+	const std::string OUT = tpath("apply_t_unrel_out");
+
+	// Same length, completely different random content, several chunks' worth.
+	write_random(OLD, 64 * 1024, 0xAAAA1111u);
+	write_random(NEW, 64 * 1024, 0xBBBB2222u);
+
+	std::string err;
+	ASSERT_TRUE(roundtrip(OLD, NEW, DELTA, OUT, &err)) << err;
+	EXPECT_EQ(read_all(NEW), read_all(OUT));
+
+	// Everything is unrelated, so the delta is essentially the new file plus
+	// bounded per-entry metadata. With ~8 KiB average chunks the byte overhead
+	// is a few percent; assert a generous 10% so the test tracks the invariant
+	// rather than the chunker's tuning.
+	const size_t delta_size = read_all(DELTA).size();
+	const size_t file_size = read_all(NEW).size();
+	EXPECT_LT(delta_size, file_size + file_size / 10)
+		<< "delta for unrelated content should be near the file size, got "
+		<< delta_size << " for " << file_size;
+
+	cleanup({OLD, NEW, DELTA, OUT});
+}

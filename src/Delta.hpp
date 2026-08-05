@@ -153,6 +153,12 @@ private:
                                FileIO& old, FileIO& file, DeltaWriter& writer, Progress& progress) {
         std::vector<bool> original_used(original_chunks.size(), false);
 
+        // Hoisted: the digest length is a constant of U, and constructing U
+        // inside the loop meant creating and destroying a hash context (an
+        // OpenSSL EVP allocation for BLAKE2b) once per modified chunk just to
+        // read that constant.
+        const size_t entry_header_cost = delta_entry_header_size(U{}.get_hash_size());
+
         for (size_t i = 0; i < new_chunks.size(); ++i) {
             DeltaEntry<typename T::RollingHashType> entry;
 
@@ -202,8 +208,7 @@ private:
                     // just the chunk length. Without this an in-place edit
                     // scattered through a chunk could encode larger than the
                     // bytes it describes, and the delta could exceed the file.
-                    const size_t literal_cost = new_chunks[i].chunk_size +
-                                                delta_entry_header_size(U{}.get_hash_size());
+                    const size_t literal_cost = new_chunks[i].chunk_size + entry_header_cost;
                     if (diff.size() <= literal_cost) {
                         entry.chunk_data_raw = std::move(diff);
                         is_modification = true;
@@ -293,6 +298,29 @@ private:
                 }
             }
             trace.insert(trace.end(), v.begin() + (offset - d), v.begin() + (offset + d + 1));
+
+            // Early abandon on dissimilar content. Running every hopeless pair
+            // to d_max is where delta generation on unrelated files spent its
+            // time: each such chunk burned the full O(d_max^2) search and then
+            // fell back to greedy regardless (50 MB of disjoint data took ~22s,
+            // almost all of it here). At a few checkpoints, measure how much of
+            // the two inputs the best path has consumed: x+y grows by 1 per
+            // edit and 2 per matched byte, so matched = (x+y - d) / 2. Genuine
+            // in-place edits accumulate matches far faster than one per two
+            // edits; random unrelated bytes almost never match. The sacrifice
+            // is content displaced by more than the first checkpoint with no
+            // common prefix — Myers at d_max could still have found those, and
+            // they now take the greedy/literal path instead.
+            if (d == 256 || d == 512 || d == 1024) {
+                int best_xy = 0;
+                for (int k = -d; k <= d; ++k) {
+                    const int x = v[offset + k];
+                    best_xy = std::max(best_xy, 2 * x - k);
+                }
+                const int matched = (best_xy - d) / 2;
+                if (matched < d / 2)
+                    return false;  // noise-similar; let greedy handle it
+            }
         }
 
         if (final_d < 0)
