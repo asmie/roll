@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -54,20 +55,29 @@ void write_random(const std::string& path, size_t bytes, uint32_t seed)
 		f.put(static_cast<char>(dist(rng)));
 }
 
-// Redirect std::cout/std::cerr to /dev/null for the duration of the call so
-// view_delta's normal output doesn't pollute the test runner's log.
+// Swallow std::cout/std::cerr for the duration of the scope so view_delta's
+// normal output doesn't pollute the test runner's log.
+//
+// Buffers in memory rather than opening "/dev/null", which does not exist on
+// Windows: there the open failed and output was discarded only because writes
+// to a failed stream are dropped silently. That happened to look like success,
+// which is worse than failing.
 struct SilenceCout {
+	std::ostringstream sink;
 	std::streambuf* old_cout;
 	std::streambuf* old_cerr;
-	std::ofstream sink;
-	SilenceCout() : sink("/dev/null", std::ios::out) {
-		old_cout = std::cout.rdbuf(sink.rdbuf());
-		old_cerr = std::cerr.rdbuf(sink.rdbuf());
-	}
+
+	SilenceCout()
+		: old_cout(std::cout.rdbuf(sink.rdbuf())),
+		  old_cerr(std::cerr.rdbuf(sink.rdbuf())) {}
+
 	~SilenceCout() {
 		std::cout.rdbuf(old_cout);
 		std::cerr.rdbuf(old_cerr);
 	}
+
+	SilenceCout(const SilenceCout&) = delete;
+	SilenceCout& operator=(const SilenceCout&) = delete;
 };
 
 } // namespace

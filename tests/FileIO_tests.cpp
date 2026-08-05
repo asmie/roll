@@ -22,9 +22,13 @@ std::string make_test_path()
 
 void prepare_file(const std::string& path)
 {
-	std::fstream f(path, std::fstream::out);
-	f << TEST_STR << std::endl;
-	f.close();
+	// Binary mode, and an explicit newline rather than std::endl. In text mode
+	// Windows translates every '\n' to "\r\n", so this fixture became 25 bytes
+	// of "...file\r\n\r\n" instead of 23 of "...file\n\n" — which shifted every
+	// byte-exact offset, length and content assertion below. FileIO always opens
+	// binary, so only the fixture was ever platform-dependent.
+	std::ofstream f(path, std::ios::binary);
+	f << TEST_STR << '\n';
 }
 
 void remove_file(const std::string& path)
