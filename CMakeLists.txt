@@ -21,7 +21,14 @@ if (MSVC)
 else()
     add_compile_options(-Wall -Wextra -pipe)
     set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g3 -ggdb")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -g0 -Os")
+    # Keep CMake's default Release optimisation (-O3 -DNDEBUG) and only add the
+    # debug-info choice. Do NOT append another -O level here: these flags land
+    # after the defaults, and the last -O on the command line is the one that
+    # takes effect. A `-Os` in this slot silently beat the default -O3 and cost
+    # 1.6x on delta generation (2.04s vs 1.31s over 100 MB) — and it also made
+    # -O2/-O3 experiments look like no-ops, since every variant still ended
+    # in -Os.
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -g0")
 endif()
 
 # Optional sanitizers (Debug builds only by default).
