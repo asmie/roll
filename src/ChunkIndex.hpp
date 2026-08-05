@@ -80,11 +80,21 @@ template <class T>
                        const SignedChunk<T>& probe,
                        size_t& out_index) {
 	auto it = map.find(probe);
-	if (it != map.end() && !used[it->second]) {
+
+	// A miss means no chunk has this content at all, so the scan below could not
+	// succeed either. Returning here keeps a lookup that finds nothing at O(1):
+	// scanning on every miss would make a caller that probes each of n chunks
+	// against a non-matching index cost O(n^2).
+	if (it == map.end())
+		return false;
+
+	if (!used[it->second]) {
 		out_index = it->second;
 		return true;
 	}
 
+	// The indexed position is taken. The map holds one position per distinct
+	// content, so another copy may still be free — scan for it.
 	for (size_t i = 0; i < chunks.size(); ++i) {
 		if (!used[i] && chunks[i] == probe) {
 			out_index = i;

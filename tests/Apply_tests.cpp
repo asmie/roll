@@ -2,7 +2,9 @@
 
 #include "Apply.hpp"
 #include "Delta.hpp"
+#include "DeltaCodec.hpp"
 #include "DeltaFormat.hpp"
+#include "FileIO.hpp"
 #include "RK_finger.hpp"
 #include "Signature.hpp"
 #include "blake2b.h"
@@ -12,6 +14,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <random>
 #include <string>
 #include <vector>
@@ -936,6 +939,118 @@ TEST(Apply, success_carries_statistics)
 	ASSERT_TRUE(ar.has_value()) << ar.error().message;
 	EXPECT_GT(ar->entries_processed, 0u);
 	EXPECT_EQ(ar->bytes_written, read_all(NEW).size());
+
+	cleanup({OLD, NEW, DELTA, OUT});
+}
+
+namespace {
+
+// Count entry types in a delta, so compression behaviour can be asserted on the
+// representation chosen rather than only on the total size.
+std::map<EntryType, size_t> count_entry_types(const std::string& delta_path)
+{
+	std::map<EntryType, size_t> counts;
+	FileIO in;
+	if (!in.open(delta_path, FileMode::IN)) return counts;
+
+	DeltaReader reader(in, BLAKE2b::HASH_SIZE);
+	if (!reader.read_header()) return counts;
+
+	while (reader.next_item() == DeltaReader::Item::Entry) {
+		DeltaEntryHeader header;
+		if (!reader.read_entry_header(header)) break;
+		counts[header.type]++;
+
+		if (header.type == EntryType::ADDED_CHUNK) {
+			std::vector<uint8_t> payload;
+			if (!reader.read_payload(static_cast<size_t>(header.chunk_size), payload))
+				break;
+		} else if (header.type == EntryType::MODIFIED_CHUNK) {
+			while (reader.at_diff_opcode()) {
+				DiffOpcode op;
+				if (!reader.read_diff_opcode(op)) return counts;
+			}
+		}
+	}
+	return counts;
+}
+
+} // namespace
+
+// A chunk peppered with edits encodes larger as a diff than as the literal
+// bytes. Emitting the diff anyway let a delta exceed the size of the file it
+// describes, so such a chunk must be stored as ADDED instead.
+TEST(Apply, dense_edits_are_stored_as_a_literal_not_a_diff)
+{
+	const std::string OLD = tpath("apply_t_dense_old");
+	const std::string NEW = tpath("apply_t_dense_new");
+	const std::string DELTA = tpath("apply_t_dense_delta");
+	const std::string OUT = tpath("apply_t_dense_out");
+
+	// 256 bytes stays one chunk (below MIN_CHUNK_SIZE), so boundaries cannot
+	// shift and the entry choice is purely the diff-vs-literal decision.
+	std::vector<uint8_t> data(256, 0xAA);
+	write_bytes(OLD, data);
+	for (size_t i = 0; i < data.size(); i += 2)
+		data[i] ^= 0xFF;  // every other byte differs
+	write_bytes(NEW, data);
+
+	std::string err;
+	ASSERT_TRUE(roundtrip(OLD, NEW, DELTA, OUT, &err)) << err;
+	EXPECT_EQ(read_all(NEW), read_all(OUT));
+
+	const auto counts = count_entry_types(DELTA);
+	EXPECT_EQ(counts.count(EntryType::MODIFIED_CHUNK), 0u)
+		<< "a diff costlier than the literal must not be emitted";
+	EXPECT_GT(counts.at(EntryType::ADDED_CHUNK), 0u);
+
+	// And the delta must stay within the literal plus a bounded header overhead.
+	const size_t overhead = 4 * delta_entry_header_size(BLAKE2b::HASH_SIZE) +
+	                        DELTA_HEADER_SIZE + 1 + BLAKE2b::HASH_SIZE;
+	EXPECT_LE(read_all(DELTA).size(), data.size() + overhead);
+
+	cleanup({OLD, NEW, DELTA, OUT});
+}
+
+// Content present in the old file must be reused however many times it appears.
+// The index records one position per distinct content, so without the fallback
+// scan every copy after the first was re-sent in full.
+TEST(Apply, repeated_content_is_reused_rather_than_resent)
+{
+	const std::string OLD = tpath("apply_t_dup_old");
+	const std::string NEW = tpath("apply_t_dup_new");
+	const std::string DELTA = tpath("apply_t_dup_delta");
+	const std::string OUT = tpath("apply_t_dup_out");
+
+	// Two distinct 64 KiB blocks, reordered between old and new. Every byte of
+	// the new file is already present in the old one.
+	std::mt19937 rng(0x9901u);
+	std::vector<uint8_t> a(64 * 1024), b(64 * 1024);
+	for (auto& x : a) x = static_cast<uint8_t>(rng());
+	for (auto& x : b) x = static_cast<uint8_t>(rng());
+
+	std::vector<uint8_t> old_data, new_data;
+	for (int i = 0; i < 4; ++i) old_data.insert(old_data.end(), a.begin(), a.end());
+	for (int i = 0; i < 4; ++i) old_data.insert(old_data.end(), b.begin(), b.end());
+	for (int i = 0; i < 4; ++i) new_data.insert(new_data.end(), b.begin(), b.end());
+	for (int i = 0; i < 4; ++i) new_data.insert(new_data.end(), a.begin(), a.end());
+	write_bytes(OLD, old_data);
+	write_bytes(NEW, new_data);
+
+	std::string err;
+	ASSERT_TRUE(roundtrip(OLD, NEW, DELTA, OUT, &err)) << err;
+	EXPECT_EQ(read_all(NEW), read_all(OUT));
+
+	// Reordered-only content should cost a small fraction of the file. Measured
+	// at ~0.11x; assert well clear of that so the check is about reuse happening
+	// at all, not about a precise ratio.
+	const size_t delta_size = read_all(DELTA).size();
+	EXPECT_LT(delta_size, new_data.size() / 3)
+		<< "delta " << delta_size << " for a " << new_data.size()
+		<< " byte reordering suggests repeated content is being re-sent";
+
+	const auto counts = count_entry_types(DELTA);
+	EXPECT_GT(counts.at(EntryType::ORIGINAL_CHUNK), 0u);
 
 	cleanup({OLD, NEW, DELTA, OUT});
 }

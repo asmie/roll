@@ -169,12 +169,17 @@ private:
                 continue;
             }
 
-            // Moved match: same content located elsewhere in old.
-            auto it = chunk_map.find(new_chunks[i]);
-            if (it != chunk_map.end() && !original_used[it->second]) {
+            // Moved match: identical content located elsewhere in old. The
+            // fallback scan inside find_unused_match is what makes repeated
+            // content reusable — the index records one position per distinct
+            // content, so before this every copy after the first was re-sent in
+            // full even though the bytes were already present in the old file.
+            size_t moved_index = 0;
+            if (find_unused_match(original_chunks, original_used, chunk_map,
+                                  new_chunks[i], moved_index)) {
                 entry.type = EntryType::ORIGINAL_CHUNK;
                 entry.chunk_data = new_chunks[i];
-                original_used[it->second] = true;
+                original_used[moved_index] = true;
                 if (!writeDeltaEntry(writer, entry, progress)) return false;
                 progress.chunks_processed++;
                 continue;
@@ -192,9 +197,22 @@ private:
                                                new_chunks[i].start_offset);
 
                 if (!old_data.empty() && !new_data.empty()) {
-                    entry.chunk_data_raw = createDiff(old_data, new_data);
-                    is_modification = true;
-                    original_used[i] = true;
+                    auto diff = createDiff(old_data, new_data);
+
+                    // Only keep the diff when it actually costs less than
+                    // storing the chunk outright. Declining the diff also
+                    // leaves the old chunk unconsumed, which costs one REMOVED
+                    // entry, so the break-even point includes that header — not
+                    // just the chunk length. Without this an in-place edit
+                    // scattered through a chunk could encode larger than the
+                    // bytes it describes, and the delta could exceed the file.
+                    const size_t literal_cost = new_chunks[i].chunk_size +
+                                                delta_entry_header_size(U{}.get_hash_size());
+                    if (diff.size() <= literal_cost) {
+                        entry.chunk_data_raw = std::move(diff);
+                        is_modification = true;
+                        original_used[i] = true;
+                    }
                 }
             }
 

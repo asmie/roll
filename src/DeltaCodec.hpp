@@ -90,6 +90,15 @@ struct DiffOpcode {
 	std::vector<uint8_t> bytes;
 };
 
+/**
+* Bytes one entry header occupies on the wire, excluding any payload:
+* type:u64 | signature:u64 | hash | chunk_size:u64.
+*/
+[[nodiscard]] inline constexpr size_t delta_entry_header_size(size_t hash_size)
+{
+	return 3 * sizeof(uint64_t) + hash_size;
+}
+
 [[nodiscard]] inline bool is_diff_opcode(int byte)
 {
 	return byte == 'D' || byte == 'I' || byte == 'X';
