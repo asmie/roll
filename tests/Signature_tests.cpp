@@ -210,3 +210,31 @@ TEST(Signature, small_file_distinct_signatures)
 	std::filesystem::remove(p1);
 	std::filesystem::remove(p2);
 }
+// Constant content holds the rolling fingerprint at one fixed value, so the
+// boundary predicate either fires at every byte or never. With the old
+// compare-against-zero predicate, all-zero input (fingerprint 0) fired at
+// every byte past the minimum: a zero-filled file degenerated into maximal
+// chunk counts at MIN_CHUNK_SIZE, with 17% metadata overhead in its deltas.
+// The target value is chosen so no single-byte-constant content can fire,
+// meaning constant runs must always cut at MAX_CHUNK_SIZE.
+TEST(Signature, constant_content_cuts_at_max_chunk_size)
+{
+	for (const uint8_t byte : {uint8_t{0x00}, uint8_t{0xFF}, uint8_t{0xAA}}) {
+		const auto path = std::filesystem::temp_directory_path() /
+		                  ("sig_const_" + std::to_string(byte));
+		const size_t file_size = 4 * DELTA_MAX_CHUNK_SIZE;
+		write_tmp(path, std::vector<uint8_t>(file_size, byte));
+
+		Signature<RKFinger, BLAKE2b> sig;
+		ASSERT_TRUE(sig.generate_signatures(path));
+		const auto& chunks = sig.get_chunks();
+
+		ASSERT_EQ(chunks.size(), 4u)
+			<< "constant 0x" << std::hex << int(byte)
+			<< " content must produce maximal chunks, not degenerate to minimal ones";
+		for (const auto& chunk : chunks)
+			EXPECT_EQ(chunk.chunk_size, DELTA_MAX_CHUNK_SIZE);
+
+		std::filesystem::remove(path);
+	}
+}

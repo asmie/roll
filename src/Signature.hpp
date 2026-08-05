@@ -115,7 +115,12 @@ public:
 
 			// Adaptive boundary detection on the rolling fingerprint: FastCDC-style
 			// normalized chunking with a tighter mask before the target size and a
-			// looser one after, bounded by MIN_CHUNK_SIZE / MAX_CHUNK_SIZE.
+			// looser one after, bounded by MIN_CHUNK_SIZE / MAX_CHUNK_SIZE. The
+			// masked fingerprint is compared against DELTA_BOUNDARY_TARGET rather
+			// than zero so constant content (whose fingerprint never changes)
+			// cannot satisfy the predicate at every byte — see the constant's
+			// definition for the analysis. A hit under the tight mask implies a
+			// hit under the loose one, preserving the normalization behaviour.
 			bool boundary_found = false;
 			if (chunk.size() >= MAX_CHUNK_SIZE) {
 				boundary_found = true;
@@ -123,7 +128,8 @@ public:
 				const uint64_t mask = (chunk.size() < TARGET_CHUNK_SIZE)
 					? 0x3FFFULL   // 1/16384 below target — discourages early cuts
 					: 0x0FFFULL;  // 1/4096  at/above target — encourages cutting near target
-				boundary_found = ((current_fingerprint & mask) == 0);
+				boundary_found = ((current_fingerprint & mask) ==
+				                  (DELTA_BOUNDARY_TARGET & mask));
 			}
 
 			if (boundary_found)					// chunk boundary found
