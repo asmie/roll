@@ -1,7 +1,10 @@
 #include "FileIO.hpp"
 
+#include "rh_config.h"
+
 #include <algorithm>
 #include <bit>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -42,8 +45,10 @@ bool FileIO::open(const std::filesystem::path& file_path, FileMode mode)
 
 	if (mode == FileMode::OUT || mode == FileMode::INOUT || mode == FileMode::EXCLUSIVE_OUT)
 		fmode |= std::fstream::out;
+#ifdef RH_HAVE_STD_NOREPLACE
 	if (mode == FileMode::EXCLUSIVE_OUT)
 		fmode |= std::ios::noreplace;
+#endif
 
 	if (f_.is_open())
 		f_.close();
@@ -57,6 +62,22 @@ bool FileIO::open(const std::filesystem::path& file_path, FileMode mode)
 		io_error_ = true;
 		return false;
 	}
+
+#ifndef RH_HAVE_STD_NOREPLACE
+	// Without std::ios::noreplace, create exclusively with C11 "x" mode, then
+	// let the stream reopen (and truncate) the file this call just created.
+	if (mode == FileMode::EXCLUSIVE_OUT) {
+#ifdef _WIN32
+		std::FILE* created = _wfopen(file_path.c_str(), L"wbx");
+#else
+		std::FILE* created = std::fopen(file_path.c_str(), "wbx");
+#endif
+		if (created == nullptr || std::fclose(created) != 0) {
+			io_error_ = true;
+			return false;
+		}
+	}
+#endif
 
 	// Clear any failbit/eofbit left over from a previous lifecycle so an open
 	// on a fresh path isn't reported as failed.

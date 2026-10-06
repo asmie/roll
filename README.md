@@ -38,9 +38,12 @@ hashing, file I/O, signatures, delta application, and rolling fingerprints.
   the whole reconstructed file against a trailer hash. Both creation and application
   reject output paths that alias an input and stage writes in an exclusively created
   temporary file beside the destination. Successful validation and close precede
-  replacement; failures preserve an existing destination. Successful replacement
-  keeps the destination's permissions but replaces a destination symlink or hard
-  link itself, leaving its former target or other names intact.
+  replacement; failures preserve an existing destination. The staged file takes an
+  existing destination's permissions before any data is written, and is flushed to
+  stable storage before it replaces the destination. Replacement swaps a destination
+  symlink or hard link itself, leaving its former target or other names intact.
+- `apply --max-output SIZE` bounds the reconstructed size, because a small hostile
+  delta can reference one old chunk any number of times.
 
 ## Requirements
 
@@ -140,6 +143,10 @@ as C++23 but has no `std::expected`**. Use GCC 13 or newer, Clang 19 or newer,
 or Clang with `-stdlib=libc++`. Configure fails with an explanatory message
 rather than a wall of template errors.
 
+Staged output files are created exclusively with `std::ios::noreplace` where the
+standard library provides it (libstdc++ 13, libc++ 18, recent MSVC), and with C11
+`fopen` mode `"x"` otherwise.
+
 ## Usage
 
 Generate a delta:
@@ -152,6 +159,13 @@ Apply a delta:
 
 ```bash
 ./rolling_hash apply oldfile.txt changes.delta reconstructed.txt
+```
+
+Bound the output size when the delta is untrusted (`K`, `M`, `G`, `T` are powers
+of 1024):
+
+```bash
+./rolling_hash apply --max-output 2G oldfile.txt changes.delta reconstructed.txt
 ```
 
 Inspect a delta:
@@ -226,15 +240,24 @@ against it. Reused new chunks are encoded from the signature without a second
 read, so the delta reproduces the new file as it was signed. These checks reject
 observed changes; they are not a filesystem snapshot or a lock against
 concurrent writers. Use snapshots or otherwise stop writes when that guarantee is
-needed. Atomic destination replacement provides failure isolation, not a promise
-of durability across a power loss.
+needed.
+
+Output is staged in a hidden `.rolling_hash-*` file beside the destination. The
+staged file is flushed to stable storage before it replaces the destination, and
+the directory is synced afterwards where the filesystem supports it, so a power
+loss leaves either the previous destination or the complete new one. On Linux
+and macOS, SIGINT, SIGTERM, SIGHUP and SIGQUIT remove the staged file before the
+process exits, and exceeding a file-size limit (`ulimit -f`) fails with status 2
+instead of killing the process. SIGKILL, a crash, a power loss, or Ctrl+C on
+Windows can still leave a staged file behind; when no `rolling_hash` is running,
+any `.rolling_hash-*` file is safe to delete.
 
 ## Exit status
 
 | Status | Meaning |
 | --- | --- |
 | `0` | Success |
-| `1` | Bad input: malformed or truncated delta, hash mismatch, or an output path that aliases an input |
+| `1` | Bad input: malformed or truncated delta, hash mismatch, an output path that aliases an input, an exceeded `--max-output`, or invalid arguments |
 | `2` | Environment failure: a file could not be opened, read, or written |
 
 ## Tests

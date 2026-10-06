@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <limits>
 #include <span>
 #include <string>
 #include <system_error>
@@ -43,17 +44,22 @@ public:
 	* @param[in] old_file_path path to the original file
 	* @param[in] delta_file_path path to the delta file produced by Delta<T,U>
 	* @param[in] output_file_path path where the reconstructed new file will be written
+	* @param[in] max_output_bytes largest output to produce. A delta can reference
+	*            one old chunk any number of times, so a small hostile delta can
+	*            describe a huge output; exceeding the limit fails application.
 	* @return Statistics on success, or the failure that stopped application.
 	*/
 	[[nodiscard]] Result apply_delta(const std::filesystem::path& old_file_path,
 	                                 const std::filesystem::path& delta_file_path,
-	                                 const std::filesystem::path& output_file_path)
+	                                 const std::filesystem::path& output_file_path,
+	                                 uint64_t max_output_bytes = std::numeric_limits<uint64_t>::max())
 	{
 		Result result;
 		// Convert escaping exceptions into a failed Result. Unwinding destroys
 		// the output transaction, which discards the staged file.
 		try {
-			result = apply_delta_impl(old_file_path, delta_file_path, output_file_path);
+			result = apply_delta_impl(old_file_path, delta_file_path, output_file_path,
+			                          max_output_bytes);
 		} catch (const std::exception& e) {
 			result = std::unexpected(DeltaError{DeltaErrc::internal_error,
 			                                    std::string("Unexpected error: ") + e.what()});
@@ -64,7 +70,8 @@ public:
 private:
 	Result apply_delta_impl(const std::filesystem::path& old_file_path,
 	                        const std::filesystem::path& delta_file_path,
-	                        const std::filesystem::path& output_file_path)
+	                        const std::filesystem::path& output_file_path,
+	                        uint64_t max_output_bytes)
 	{
 		ApplyStats stats;
 
@@ -190,6 +197,11 @@ private:
 				}
 			}
 
+			if (produced.size() > max_output_bytes - stats.bytes_written) {
+				return std::unexpected(DeltaError{DeltaErrc::limit_exceeded,
+				                                    "Output would exceed the limit of " +
+				                                    std::to_string(max_output_bytes) + " bytes"});
+			}
 			if (!output.write_chunk(produced)) {
 				return std::unexpected(DeltaError{DeltaErrc::io_error,
 				                                    "Failed to write output chunk"});

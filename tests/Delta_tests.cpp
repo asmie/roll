@@ -357,3 +357,69 @@ TEST(Delta, v5_golden_bytes_match_an_independent_encoding)
 }
 
 } // namespace
+
+TEST(Apply, output_limit_fails_cleanly_and_an_exact_limit_succeeds)
+{
+	Files f;
+	f.prepare();
+	f.generate();
+	const std::vector<uint8_t> sentinel{'k','e','e','p'};
+	testfiles::write(f.out, sentinel);
+	Applier applier;
+	const auto limited = applier.apply_delta(f.old, f.delta, f.out, f.bytes.size() - 1);
+	ASSERT_FALSE(limited.has_value());
+	EXPECT_EQ(limited.error().code, DeltaErrc::limit_exceeded);
+	EXPECT_EQ(testfiles::read(f.out), sentinel);
+	for (const auto& entry : std::filesystem::directory_iterator(f.workspace.path()))
+		EXPECT_FALSE(entry.path().filename().string().starts_with(".rolling_hash-"));
+	ASSERT_TRUE(applier.apply_delta(f.old, f.delta, f.out, f.bytes.size()).has_value());
+	EXPECT_EQ(testfiles::read(f.out), f.bytes);
+}
+
+#ifndef _WIN32
+TEST(OutputTransaction, signal_cleanup_removes_only_staged_files)
+{
+	Files f;
+	f.prepare();
+	const auto staged = [&] {
+		size_t count = 0;
+		for (const auto& entry : std::filesystem::directory_iterator(f.workspace.path()))
+			count += entry.path().filename().string().starts_with(".rolling_hash-");
+		return count;
+	};
+	{
+		OutputTransaction transaction;
+		ASSERT_TRUE(transaction.open(f.out, {f.old}).has_value());
+		ASSERT_TRUE(transaction.file().write_byte('X'));
+		ASSERT_EQ(staged(), 1u);
+		OutputTransaction::discard_all_staged();
+		EXPECT_EQ(staged(), 0u);
+	}
+	{
+		OutputTransaction transaction;
+		ASSERT_TRUE(transaction.open(f.out, {f.old}).has_value());
+		ASSERT_TRUE(transaction.file().write_byte('Y'));
+		ASSERT_TRUE(transaction.commit().has_value());
+	}
+	// A committed transaction no longer names anything to discard.
+	OutputTransaction::discard_all_staged();
+	EXPECT_EQ(testfiles::read(f.out), std::vector<uint8_t>{'Y'});
+	EXPECT_EQ(testfiles::read(f.old), f.bytes);
+}
+
+TEST(OutputTransaction, private_destination_is_never_staged_readable)
+{
+	Files f;
+	f.prepare();
+	testfiles::write(f.out, std::vector<uint8_t>{'x'});
+	const auto mode = std::filesystem::perms::owner_read | std::filesystem::perms::owner_write;
+	std::filesystem::permissions(f.out, mode);
+	OutputTransaction transaction;
+	ASSERT_TRUE(transaction.open(f.out, {f.old}).has_value());
+	for (const auto& entry : std::filesystem::directory_iterator(f.workspace.path())) {
+		if (entry.path().filename().string().starts_with(".rolling_hash-")) {
+			EXPECT_EQ(entry.status().permissions(), mode);
+		}
+	}
+}
+#endif

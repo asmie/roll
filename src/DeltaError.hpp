@@ -24,6 +24,7 @@ enum class DeltaErrc {
 	corrupt_delta,        ///< Delta stream malformed, truncated, or out of order.
 	integrity_mismatch,   ///< A hash did not match the data it covers.
 	invalid_argument,     ///< Caller-supplied paths are unusable (e.g. aliasing).
+	limit_exceeded,       ///< Application would exceed the caller's output limit.
 	internal_error,       ///< Unexpected exception escaped the operation.
 };
 
@@ -46,6 +47,7 @@ inline std::string_view to_string(DeltaErrc code) noexcept
 		case DeltaErrc::corrupt_delta:      return "corrupt delta";
 		case DeltaErrc::integrity_mismatch: return "integrity mismatch";
 		case DeltaErrc::invalid_argument:   return "invalid argument";
+		case DeltaErrc::limit_exceeded:     return "limit exceeded";
 		case DeltaErrc::internal_error:     return "internal error";
 	}
 	return "unknown error";

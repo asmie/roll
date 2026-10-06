@@ -123,7 +123,7 @@ check_cxx_source_compiles("
     int main() { return f(D{}); }
 " RH_HAVE_STD_CONCEPTS_DERIVED_FROM)
 
-foreach(_symbol BYTESWAP ENDIAN SPAN FILESYSTEM TO_UNDERLYING EXPECTED NOREPLACE CONCEPTS_DERIVED_FROM)
+foreach(_symbol BYTESWAP ENDIAN SPAN FILESYSTEM TO_UNDERLYING EXPECTED CONCEPTS_DERIVED_FROM)
     if (NOT RH_HAVE_STD_${_symbol})
         message(FATAL_ERROR "rolling_hash requires C++23 library support: missing library feature ${_symbol}. Use GCC 13+, Clang 19+, or Clang with libc++.")
     endif()

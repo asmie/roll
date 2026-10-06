@@ -52,7 +52,7 @@
 #cmakedefine RH_HAVE_STD_FILESYSTEM      // <filesystem>, C++17
 #cmakedefine RH_HAVE_STD_TO_UNDERLYING   // <utility>, C++23
 #cmakedefine RH_HAVE_STD_EXPECTED        // <expected>, C++23
-#cmakedefine RH_HAVE_STD_NOREPLACE       // <fstream>, C++23
+#cmakedefine RH_HAVE_STD_NOREPLACE       // <fstream>, C++23; optional, FileIO falls back to C11 fopen "x"
 #cmakedefine RH_HAVE_STD_CONCEPTS_DERIVED_FROM  // <concepts>, C++20
 
 // ---- Critical-header gate -------------------------------------------------
@@ -75,9 +75,8 @@
 #if !defined(RH_HAVE_STD_BYTESWAP) || !defined(RH_HAVE_STD_ENDIAN) || \
     !defined(RH_HAVE_STD_SPAN) || !defined(RH_HAVE_STD_FILESYSTEM) || \
     !defined(RH_HAVE_STD_TO_UNDERLYING) || !defined(RH_HAVE_STD_EXPECTED) || \
-    !defined(RH_HAVE_STD_NOREPLACE) || \
     !defined(RH_HAVE_STD_CONCEPTS_DERIVED_FROM)
-#error "rolling_hash needs std::byteswap, std::endian, std::span, std::filesystem, std::to_underlying, std::expected, std::ios::noreplace, and std::derived_from."
+#error "rolling_hash needs std::byteswap, std::endian, std::span, std::filesystem, std::to_underlying, std::expected, and std::derived_from."
 #endif
 
 // A specific and easily-mistaken combination: Clang before 19 reports
