@@ -1,3 +1,4 @@
+#include "TestWorkspace.hpp"
 #include "gtest/gtest.h"
 
 #include "Apply.hpp"
@@ -34,7 +35,7 @@ constexpr size_t d_opcode_size(size_t inline_count)
 std::string tpath(const char* name)
 {
 	static std::atomic<unsigned> counter{0};
-	const auto p = std::filesystem::temp_directory_path() /
+	const auto p = testfiles::directory() /
 	               ("roll_" + std::to_string(counter++) + "_" + name);
 	return p.string();
 }
@@ -43,28 +44,19 @@ void write_random(const std::string& path, size_t bytes, uint32_t seed)
 {
 	std::mt19937 rng(seed);
 	std::uniform_int_distribution<int> dist(0, 255);
-	std::ofstream f(path, std::ios::binary);
-	for (size_t i = 0; i < bytes; ++i)
-		f.put(static_cast<char>(dist(rng)));
+	std::vector<uint8_t> data(bytes);
+	for (auto& byte : data) byte = static_cast<uint8_t>(dist(rng));
+	testfiles::write(path, data);
 }
 
 void write_bytes(const std::string& path, const std::vector<uint8_t>& bytes)
 {
-	std::ofstream f(path, std::ios::binary);
-	if (!bytes.empty())
-		f.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+	testfiles::write(path, bytes);
 }
 
 std::vector<uint8_t> read_all(const std::string& path)
 {
-	std::ifstream f(path, std::ios::binary | std::ios::ate);
-	if (!f) return {};
-	auto size = f.tellg();
-	f.seekg(0);
-	std::vector<uint8_t> buf(static_cast<size_t>(size));
-	if (size > 0)
-		f.read(reinterpret_cast<char*>(buf.data()), buf.size());
-	return buf;
+	return testfiles::read(path);
 }
 
 void cleanup(std::initializer_list<std::string> paths)

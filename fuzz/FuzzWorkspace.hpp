@@ -4,7 +4,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
-#include <unistd.h>
+#include <random>
+#include <stdexcept>
+#include <streambuf>
 #include <filesystem>
 #include <fstream>
 #include <span>
@@ -27,10 +29,16 @@ class Workspace {
 public:
 	Workspace()
 	{
-		std::error_code ec;
-		root_ = std::filesystem::temp_directory_path() /
-		        ("rh_fuzz_" + std::to_string(static_cast<long>(::getpid())));
-		std::filesystem::create_directories(root_, ec);
+		std::random_device random;
+		for (unsigned attempt = 0; attempt < 32; ++attempt) {
+			auto candidate = std::filesystem::temp_directory_path() /
+				("rh_fuzz_" + std::to_string(random()) + "_" + std::to_string(random()));
+			if (std::filesystem::create_directory(candidate)) {
+				root_ = std::move(candidate);
+				return;
+			}
+		}
+		throw std::runtime_error("Cannot create fuzz workspace");
 	}
 
 	~Workspace()
@@ -47,17 +55,20 @@ public:
 	static void write(const std::string& path, std::span<const uint8_t> bytes)
 	{
 		std::ofstream f(path, std::ios::binary | std::ios::trunc);
+		f.exceptions(std::ios::badbit | std::ios::failbit);
 		if (!bytes.empty())
 			f.write(reinterpret_cast<const char*>(bytes.data()),
 			        static_cast<std::streamsize>(bytes.size()));
+		f.close();
 	}
 
 	static std::vector<uint8_t> read(const std::string& path)
 	{
 		std::ifstream f(path, std::ios::binary | std::ios::ate);
-		if (!f) return {};
+		f.exceptions(std::ios::badbit | std::ios::failbit);
 		const auto size = f.tellg();
-		if (size <= 0) return {};
+		if (size < 0) throw std::runtime_error("Cannot size fuzz input");
+		if (size == 0) return {};
 		f.seekg(0);
 		std::vector<uint8_t> buf(static_cast<size_t>(size));
 		f.read(reinterpret_cast<char*>(buf.data()),
@@ -67,14 +78,12 @@ public:
 
 	static bool exists(const std::string& path)
 	{
-		std::error_code ec;
-		return std::filesystem::exists(path, ec);
+		return std::filesystem::exists(path);
 	}
 
 	static void remove(const std::string& path)
 	{
-		std::error_code ec;
-		std::filesystem::remove(path, ec);
+		std::filesystem::remove(path);
 	}
 
 private:
@@ -84,16 +93,19 @@ private:
 /// Silence stdout for the duration of the scope. `view` prints a full report per
 /// input, which would otherwise dominate a fuzzing run's output and its runtime.
 class SuppressStdout {
+	class Sink : public std::streambuf {
+		int_type overflow(int_type ch) override { return traits_type::not_eof(ch); }
+		std::streamsize xsputn(const char*, std::streamsize count) override { return count; }
+	};
 public:
-	SuppressStdout() : sink_("/dev/null", std::ios::out), saved_(std::cout.rdbuf(sink_.rdbuf())) {}
-	~SuppressStdout() { std::cout.rdbuf(saved_); }
-
+	SuppressStdout() : saved_(std::cout.rdbuf(&sink_)), errors_(std::cerr.rdbuf(&sink_)) {}
+	~SuppressStdout() { std::cout.rdbuf(saved_); std::cerr.rdbuf(errors_); }
 	SuppressStdout(const SuppressStdout&) = delete;
 	SuppressStdout& operator=(const SuppressStdout&) = delete;
-
 private:
-	std::ofstream sink_;
+	Sink sink_;
 	std::streambuf* saved_;
+	std::streambuf* errors_;
 };
 
 } // namespace fuzzing

@@ -1,4 +1,6 @@
+#include "TestWorkspace.hpp"
 #include <limits.h>
+#include <limits>
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -35,9 +37,7 @@ namespace {
 
 void write_tmp(const std::filesystem::path& p, const std::vector<uint8_t>& bytes)
 {
-	std::ofstream f(p, std::ios::binary);
-	if (!bytes.empty())
-		f.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+	testfiles::write(p, bytes);
 }
 
 } // namespace
@@ -49,7 +49,7 @@ TEST(Signature, generate_signature)
 	// resolves when the build directory happens to sit directly inside the
 	// repository root, so the test failed in any other build location
 	// (sanitizer builds, IDE build dirs, packaging trees).
-	const auto path = std::filesystem::temp_directory_path() / "sig_generate_signature";
+	const auto path = testfiles::directory() / "sig_generate_signature";
 	std::mt19937 rng(0x5EEDu);
 	std::vector<uint8_t> data(512 * 1024);
 	for (auto& b : data)
@@ -95,7 +95,7 @@ TEST(Signature, small_file_under_window)
 {
 	// File shorter than WINDOW_DEF_SIZE: must still produce one chunk with a
 	// deterministic, content-derived signature (not zero / not stale).
-	const auto path = std::filesystem::temp_directory_path() / "sig_small_under_window";
+	const auto path = testfiles::directory() / "sig_small_under_window";
 	std::vector<uint8_t> data(WINDOW_DEF_SIZE / 2);
 	for (size_t i = 0; i < data.size(); ++i)
 		data[i] = static_cast<uint8_t>(i * 13u + 7u);
@@ -128,8 +128,8 @@ TEST(Signature, shift_invariance_resyncs_after_insertion)
 	shifted.push_back(0x42);
 	shifted.insert(shifted.end(), data.begin(), data.end());
 
-	const auto p_data = std::filesystem::temp_directory_path() / "sig_shift_orig";
-	const auto p_shift = std::filesystem::temp_directory_path() / "sig_shift_plus1";
+	const auto p_data = testfiles::directory() / "sig_shift_orig";
+	const auto p_shift = testfiles::directory() / "sig_shift_plus1";
 	write_tmp(p_data, data);
 	write_tmp(p_shift, shifted);
 
@@ -167,8 +167,8 @@ TEST(Signature, regenerate_replaces_previous_chunks)
 {
 	// Calling generate_signatures twice on the same instance must not append
 	// to the previous run's chunks.
-	const auto p1 = std::filesystem::temp_directory_path() / "sig_regen_a";
-	const auto p2 = std::filesystem::temp_directory_path() / "sig_regen_b";
+	const auto p1 = testfiles::directory() / "sig_regen_a";
+	const auto p2 = testfiles::directory() / "sig_regen_b";
 	std::vector<uint8_t> a(WINDOW_DEF_SIZE * 4, 0xAA);
 	std::vector<uint8_t> b(WINDOW_DEF_SIZE / 2, 0xBB);
 	write_tmp(p1, a);
@@ -192,8 +192,8 @@ TEST(Signature, small_file_distinct_signatures)
 	// Two distinct sub-window files must yield distinct signatures — the bug
 	// pinned every short-file signature to 0 / to whatever happened to be in
 	// current_fingerprint, conflating different content.
-	const auto p1 = std::filesystem::temp_directory_path() / "sig_small_a";
-	const auto p2 = std::filesystem::temp_directory_path() / "sig_small_b";
+	const auto p1 = testfiles::directory() / "sig_small_a";
+	const auto p2 = testfiles::directory() / "sig_small_b";
 	std::vector<uint8_t> a(WINDOW_DEF_SIZE / 2, 0xAA);
 	std::vector<uint8_t> b = a;
 	b[5] ^= 0x01;
@@ -220,8 +220,9 @@ TEST(Signature, small_file_distinct_signatures)
 // meaning constant runs must always cut at MAX_CHUNK_SIZE.
 TEST(Signature, constant_content_cuts_at_max_chunk_size)
 {
-	for (const uint8_t byte : {uint8_t{0x00}, uint8_t{0xFF}, uint8_t{0xAA}}) {
-		const auto path = std::filesystem::temp_directory_path() /
+	for (unsigned value = 0; value < 256; ++value) {
+		const auto byte = static_cast<uint8_t>(value);
+		const auto path = testfiles::directory() /
 		                  ("sig_const_" + std::to_string(byte));
 		const size_t file_size = 4 * DELTA_MAX_CHUNK_SIZE;
 		write_tmp(path, std::vector<uint8_t>(file_size, byte));
@@ -245,7 +246,7 @@ TEST(Signature, constant_content_cuts_at_max_chunk_size)
 // chunks contiguously cover the input, which is the property this relies on.
 TEST(Signature, whole_file_hash_matches_a_one_shot_of_the_file)
 {
-	const auto path = std::filesystem::temp_directory_path() / "sig_whole_hash";
+	const auto path = testfiles::directory() / "sig_whole_hash";
 	std::mt19937 rng(0xF00Du);
 	std::vector<uint8_t> data(100 * 1024);
 	for (auto& b : data)
@@ -267,7 +268,7 @@ TEST(Signature, whole_file_hash_matches_a_one_shot_of_the_file)
 
 TEST(Signature, whole_file_hash_is_empty_unless_requested)
 {
-	const auto path = std::filesystem::temp_directory_path() / "sig_whole_skip";
+	const auto path = testfiles::directory() / "sig_whole_skip";
 	write_tmp(path, std::vector<uint8_t>(2048, 0x42));
 
 	Signature<RKFinger, BLAKE2b> sig;
@@ -286,7 +287,7 @@ TEST(Signature, whole_file_hash_is_empty_unless_requested)
 
 TEST(Signature, whole_file_hash_of_an_empty_file_is_the_empty_digest)
 {
-	const auto path = std::filesystem::temp_directory_path() / "sig_whole_empty";
+	const auto path = testfiles::directory() / "sig_whole_empty";
 	write_tmp(path, {});
 
 	Signature<RKFinger, BLAKE2b> sig;
@@ -300,4 +301,18 @@ TEST(Signature, whole_file_hash_of_an_empty_file_is_the_empty_digest)
 	EXPECT_EQ(sig.whole_file_hash(), expected);
 
 	std::filesystem::remove(path);
+}
+
+TEST(Signature, propagates_a_seek_error_and_clears_previous_results)
+{
+	const auto path = testfiles::directory() / "sig_io_error";
+	write_tmp(path, std::vector<uint8_t>(1024, 'A'));
+	Signature<RKFinger, BLAKE2b> signature;
+	ASSERT_TRUE(signature.generate_signatures(path, WholeFileHash::Compute));
+	FileIO file;
+	ASSERT_TRUE(file.open(path, FileMode::IN));
+	EXPECT_TRUE(file.read_chunk(1, std::numeric_limits<size_t>::max()).empty());
+	EXPECT_FALSE(signature.generate_signatures(file, WholeFileHash::Compute));
+	EXPECT_TRUE(signature.get_chunks().empty());
+	EXPECT_TRUE(signature.whole_file_hash().empty());
 }

@@ -71,11 +71,11 @@ int run_create(const char* old_path, const char* new_path, const char* delta_pat
 	// exception from the worker on this thread, where main()'s handler sees it.
 	if (!old_ok.get()) {
 		std::cerr << "Failed to read old file: " << old_path << std::endl;
-		return 1;
+		return 2;
 	}
 	if (!new_ok) {
 		std::cerr << "Failed to read new file: " << new_path << std::endl;
-		return 1;
+		return 2;
 	}
 
 	Delta<RKFinger, BLAKE2b> delta;

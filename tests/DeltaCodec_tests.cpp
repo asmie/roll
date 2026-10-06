@@ -1,3 +1,4 @@
+#include "TestWorkspace.hpp"
 #include "gtest/gtest.h"
 
 #include "DeltaCodec.hpp"
@@ -19,28 +20,19 @@ constexpr size_t TRAILER_SIZE = 64;
 std::string codec_path(const char* name)
 {
 	static std::atomic<unsigned> counter{0};
-	const auto p = std::filesystem::temp_directory_path() /
+	const auto p = testfiles::directory() /
 	               ("roll_codec_" + std::to_string(counter++) + "_" + name);
 	return p.string();
 }
 
 void write_bytes(const std::string& path, const std::vector<uint8_t>& bytes)
 {
-	std::ofstream f(path, std::ios::binary);
-	if (!bytes.empty())
-		f.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+	testfiles::write(path, bytes);
 }
 
 std::vector<uint8_t> read_all(const std::string& path)
 {
-	std::ifstream f(path, std::ios::binary | std::ios::ate);
-	if (!f) return {};
-	const auto size = f.tellg();
-	f.seekg(0);
-	std::vector<uint8_t> buf(static_cast<size_t>(size));
-	if (size > 0)
-		f.read(reinterpret_cast<char*>(buf.data()), buf.size());
-	return buf;
+	return testfiles::read(path);
 }
 
 std::vector<uint8_t> make_digest(uint8_t seed)

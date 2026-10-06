@@ -1,7 +1,7 @@
 # CMakeLists file written by Piotr "asmie" Olszewski
 # Project: rolling_hash
 
-cmake_minimum_required(VERSION 3.16 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
 project(rolling_hash CXX)
 
 # Versioning
@@ -30,6 +30,8 @@ else()
     # in -Os.
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -g0")
 endif()
+
+option(RH_WARNINGS_AS_ERRORS "Treat project warnings as errors" OFF)
 
 # Optional sanitizers (Debug builds only by default).
 option(RH_ENABLE_ASAN "Build with AddressSanitizer + UBSan" OFF)
@@ -109,12 +111,23 @@ check_cxx_source_compiles("
 " RH_HAVE_STD_EXPECTED)
 
 check_cxx_source_compiles("
+    #include <fstream>
+    int main() { auto mode = std::ios::out | std::ios::noreplace; (void) mode; }
+" RH_HAVE_STD_NOREPLACE)
+
+check_cxx_source_compiles("
     #include <concepts>
     struct B {};
     struct D : B {};
     template<class T> requires std::derived_from<T, B> int f(T) { return 0; }
     int main() { return f(D{}); }
 " RH_HAVE_STD_CONCEPTS_DERIVED_FROM)
+
+foreach(_symbol BYTESWAP ENDIAN SPAN FILESYSTEM TO_UNDERLYING EXPECTED NOREPLACE CONCEPTS_DERIVED_FROM)
+    if (NOT RH_HAVE_STD_${_symbol})
+        message(FATAL_ERROR "rolling_hash requires C++23 library support: missing library feature ${_symbol}. Use GCC 13+, Clang 19+, or Clang with libc++.")
+    endif()
+endforeach()
 
 # Configuration file
 configure_file(
@@ -129,6 +142,7 @@ set(RH_SOURCES
     src/blake2b.cpp
     src/FileIO.cpp
     src/DeltaViewer.cpp
+    src/OutputTransaction.cpp
 )
 
 set(RH_TEST_SOURCES
@@ -136,6 +150,7 @@ set(RH_TEST_SOURCES
     tests/Blake_tests.cpp
     tests/ChunkIndex_tests.cpp
     tests/DeltaCodec_tests.cpp
+    tests/Delta_tests.cpp
     tests/DeltaViewer_tests.cpp
     tests/FileIO_tests.cpp
     tests/HashConcepts_tests.cpp
@@ -165,6 +180,18 @@ target_link_libraries(rh_core PUBLIC Threads::Threads OpenSSL::Crypto)
 add_executable(${PROJECT_NAME} src/main.cpp)
 target_link_libraries(${PROJECT_NAME} PRIVATE rh_core)
 
+function(rh_project_warnings target)
+    if (RH_WARNINGS_AS_ERRORS)
+        if (MSVC)
+            target_compile_options(${target} PRIVATE /WX)
+        else()
+            target_compile_options(${target} PRIVATE -Werror)
+        endif()
+    endif()
+endfunction()
+rh_project_warnings(rh_core)
+rh_project_warnings(${PROJECT_NAME})
+
 # ---- Install --------------------------------------------------------------
 
 include(GNUInstallDirs)
@@ -180,6 +207,10 @@ install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 option(RH_BUILD_FUZZERS "Build the fuzz targets" OFF)
 
 if (RH_BUILD_FUZZERS)
+    add_executable(fuzz_make_corpus fuzz/make_corpus.cpp)
+    target_link_libraries(fuzz_make_corpus PRIVATE rh_core)
+    target_include_directories(fuzz_make_corpus PRIVATE "${PROJECT_SOURCE_DIR}/fuzz")
+    rh_project_warnings(fuzz_make_corpus)
     include(CheckCXXSourceCompiles)
     set(CMAKE_REQUIRED_FLAGS "-fsanitize=fuzzer")
     check_cxx_source_compiles("
@@ -197,17 +228,27 @@ if (RH_BUILD_FUZZERS)
         message(STATUS "libFuzzer unavailable; building fuzz targets as replay drivers")
     endif()
 
+    if (RH_HAVE_LIBFUZZER)
+        add_library(rh_fuzz_core OBJECT ${RH_SOURCES})
+        target_include_directories(rh_fuzz_core PUBLIC "${PROJECT_SOURCE_DIR}/src" "${CMAKE_CURRENT_BINARY_DIR}/generated")
+        target_link_libraries(rh_fuzz_core PUBLIC Threads::Threads OpenSSL::Crypto)
+        target_compile_options(rh_fuzz_core PRIVATE -fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer)
+        rh_project_warnings(rh_fuzz_core)
+    endif()
+
     foreach(_name fuzz_apply fuzz_roundtrip)
         if (RH_HAVE_LIBFUZZER)
             add_executable(${_name} fuzz/${_name}.cpp)
             target_compile_options(${_name} PRIVATE -fsanitize=fuzzer,address,undefined)
             target_link_options(${_name} PRIVATE -fsanitize=fuzzer,address,undefined)
-            target_link_libraries(${_name} PRIVATE rh_core)
+            target_link_libraries(${_name} PRIVATE rh_fuzz_core)
             target_include_directories(${_name} PRIVATE "${PROJECT_SOURCE_DIR}/fuzz")
+            rh_project_warnings(${_name})
         else()
             add_executable(${_name}_replay fuzz/${_name}.cpp fuzz/replay_main.cpp)
             target_link_libraries(${_name}_replay PRIVATE rh_core)
             target_include_directories(${_name}_replay PRIVATE "${PROJECT_SOURCE_DIR}/fuzz")
+            rh_project_warnings(${_name}_replay)
         endif()
     endforeach()
 endif()
@@ -222,6 +263,7 @@ include(CTest)
 option(RH_BUILD_TESTS "Build the unit test target" ${BUILD_TESTING})
 
 if (RH_BUILD_TESTS)
+    set(INSTALL_GTEST OFF CACHE BOOL "Do not install bundled test dependencies" FORCE)
     include(FetchContent)
     FetchContent_Declare(
             googletest
@@ -233,5 +275,8 @@ if (RH_BUILD_TESTS)
     include(GoogleTest)
     add_executable(${PROJECT_NAME}_unit ${RH_TEST_SOURCES})
     target_link_libraries(${PROJECT_NAME}_unit PRIVATE rh_core gtest)
+    rh_project_warnings(${PROJECT_NAME}_unit)
     gtest_discover_tests(${PROJECT_NAME}_unit)
+    add_test(NAME CLI.contract COMMAND ${CMAKE_COMMAND}
+        "-DRH_CLI=$<TARGET_FILE:rolling_hash>" -P "${PROJECT_SOURCE_DIR}/tests/cli_tests.cmake")
 endif()

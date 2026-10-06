@@ -14,6 +14,7 @@
 
 #include "Apply.hpp"
 #include "Delta.hpp"
+#include "DeltaViewer.hpp"
 #include "FuzzWorkspace.hpp"
 #include "RK_finger.hpp"
 #include "Signature.hpp"
@@ -52,7 +53,7 @@ Fixture& fixture()
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
 {
 	// Two leading bytes steer the split; the rest is content.
-	if (size < 3)
+	if (size < 2)
 		return 0;
 
 	const size_t body = size - 2;
@@ -80,6 +81,10 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
 	if (generated->bytes_written != fuzzing::Workspace::read(fx.delta_path).size())
 		fail("reported delta bytes disagree with the delta file size");
 
+	{
+		fuzzing::SuppressStdout quiet;
+		if (view_delta(fx.delta_path) != 0) fail("view rejected a generated delta");
+	}
 	Apply<RKFinger, BLAKE2b> apply;
 	const auto applied = apply.apply_delta(fx.old_path, fx.delta_path, fx.out_path);
 	if (!applied.has_value())

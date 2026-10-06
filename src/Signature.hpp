@@ -8,6 +8,7 @@
 #include <concepts>
 #include <filesystem>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 /// Whether generate_signatures should additionally hash the entire input.
@@ -56,7 +57,7 @@ class Signature {
 public:
 	/**
 	* Generate signatures by opening the given path and processing its contents.
-	* @return False if the path could not be opened, true otherwise (chunks may
+	* @return False if the path could not be opened or read, true otherwise (chunks may
 	*         still be empty for a zero-byte file).
 	*/
 	[[nodiscard]] bool generate_signatures(const std::filesystem::path& datafile,
@@ -74,7 +75,7 @@ public:
 	* Generate signatures by reading from an already-open FileIO. Data is read
 	* from offset 0; the file position at return is unspecified. The FileIO is
 	* not closed by this call.
-	* @return False if `file` is not open, true otherwise.
+	* @return False if opening, seeking, or reading failed.
 	*/
 	[[nodiscard]] bool generate_signatures(FileIO& file,
 	                                       WholeFileHash mode = WholeFileHash::Skip) {
@@ -97,6 +98,11 @@ public:
 		// Every successful return must run this, including the empty-file one:
 		// the digest of an empty input is still a defined value.
 		const auto finish = [&]() -> bool {
+			if (file.has_error() || bytes_read != file.size()) {
+				chunks.clear();
+				whole_hash_.clear();
+				return false;
+			}
 			if (whole) {
 				whole_hash_.resize(whole->get_hash_size());
 				whole->finalize(whole_hash_);
@@ -211,8 +217,9 @@ private:
 		// memory would let the two disagree.
 		std::vector<uint8_t> full(hash_func.get_hash_size());
 		hash_func.hash(full, data);
-		full.resize(DELTA_DIGEST_BYTES);
-		schunk.hash = std::move(full);
+		if (full.size() < DELTA_DIGEST_BYTES)
+			throw std::invalid_argument("Strong hash must provide at least 16 bytes");
+		schunk.hash.assign(full.begin(), full.begin() + DELTA_DIGEST_BYTES);
 
 		schunk.start_offset = start_offset;
 		schunk.chunk_size = data.size();

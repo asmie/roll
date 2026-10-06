@@ -14,6 +14,7 @@
 #include "Apply.hpp"
 #include "DeltaViewer.hpp"
 #include "FuzzWorkspace.hpp"
+#include "SeedData.hpp"
 #include "RK_finger.hpp"
 #include "blake2b.h"
 
@@ -25,19 +26,6 @@
 
 namespace {
 
-// A fixed old file, so a failure reproduces from the input alone. Content is
-// deliberately compressible-but-not-constant and spans several chunks, giving
-// the applier real chunks to match ORIGINAL and MODIFIED entries against.
-std::vector<uint8_t> make_old_content()
-{
-	std::vector<uint8_t> data(48u * 1024u);
-	uint32_t state = 0x1234567u;
-	for (size_t i = 0; i < data.size(); ++i) {
-		state = state * 1103515245u + 12345u;
-		data[i] = static_cast<uint8_t>((state >> 16) ^ (i & 0x3F));
-	}
-	return data;
-}
 
 struct Fixture {
 	fuzzing::Workspace workspace;
@@ -46,7 +34,7 @@ struct Fixture {
 	std::string out_path = workspace.path("out.bin");
 	std::string out_again_path = workspace.path("out2.bin");
 
-	Fixture() { fuzzing::Workspace::write(old_path, make_old_content()); }
+	Fixture() { fuzzing::Workspace::write(old_path, fuzzing::make_old_content()); }
 };
 
 Fixture& fixture()
@@ -72,21 +60,30 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
 	fuzzing::Workspace::remove(fx.out_path);
 	fuzzing::Workspace::remove(fx.out_again_path);
 
+	int viewed;
 	{
-		// view must survive any input; its return value is not constrained.
 		fuzzing::SuppressStdout quiet;
-		(void) view_delta(fx.delta_path);
+		viewed = view_delta(fx.delta_path);
 	}
+	// Alternate between a fresh and an existing destination, so both failure
+	// promises are checked without applying every input twice.
+	const bool existing = (size & 1) != 0;
+	const std::vector<uint8_t> sentinel{'p','r','e','s','e','r','v','e'};
+	if (existing)
+		fuzzing::Workspace::write(fx.out_path, sentinel);
 
 	Apply<RKFinger, BLAKE2b> apply;
 	const auto result = apply.apply_delta(fx.old_path, fx.delta_path, fx.out_path);
 
 	if (!result.has_value()) {
-		if (fuzzing::Workspace::exists(fx.out_path))
+		if (existing && fuzzing::Workspace::read(fx.out_path) != sentinel)
+			fail("failed apply changed an existing destination");
+		if (!existing && fuzzing::Workspace::exists(fx.out_path))
 			fail("failed apply left an output file behind");
 		return 0;
 	}
 
+	if (viewed != 0) fail("view rejected a successfully applied delta");
 	const auto first = fuzzing::Workspace::read(fx.out_path);
 	if (first.size() != result->bytes_written)
 		fail("reported bytes_written disagrees with the output file size");

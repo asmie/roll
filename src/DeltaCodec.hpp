@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 #include <span>
 #include <string>
 #include <vector>
@@ -120,6 +121,13 @@ class DeltaWriter {
 public:
 	explicit DeltaWriter(FileIO& out) : out_(out) {}
 
+	[[nodiscard]] static size_t added_size(size_t payload_size) noexcept {
+		return 1 + varint_size(payload_size) + DELTA_DIGEST_BYTES + payload_size;
+	}
+	[[nodiscard]] static size_t modified_size(uint64_t old_index, size_t out_size, size_t diff_size) noexcept {
+		return 1 + varint_size(old_index) + varint_size(out_size) + DELTA_DIGEST_BYTES + diff_size;
+	}
+
 	[[nodiscard]] bool write_header()
 	{
 		std::vector<uint8_t> header;
@@ -132,25 +140,14 @@ public:
 	/// Reuse an old chunk verbatim.
 	[[nodiscard]] bool write_original(uint64_t old_index, std::span<const uint8_t> digest)
 	{
-		std::vector<uint8_t> record;
-		record.reserve(1 + VARINT_MAX_BYTES + digest.size());
-		record.push_back(static_cast<uint8_t>(EntryType::ORIGINAL_CHUNK));
-		push_varint(record, old_index);
-		record.insert(record.end(), digest.begin(), digest.end());
-		return emit(record, "ORIGINAL entry");
+		return emitRecord(EntryType::ORIGINAL_CHUNK, {old_index}, digest, {}, "ORIGINAL entry");
 	}
 
 	/// Supply new bytes verbatim.
 	[[nodiscard]] bool write_added(std::span<const uint8_t> digest,
 	                               std::span<const uint8_t> payload)
 	{
-		std::vector<uint8_t> record;
-		record.reserve(1 + VARINT_MAX_BYTES + digest.size() + payload.size());
-		record.push_back(static_cast<uint8_t>(EntryType::ADDED_CHUNK));
-		push_varint(record, payload.size());
-		record.insert(record.end(), digest.begin(), digest.end());
-		record.insert(record.end(), payload.begin(), payload.end());
-		return emit(record, "ADDED entry");
+		return emitRecord(EntryType::ADDED_CHUNK, {payload.size()}, digest, payload, "ADDED entry");
 	}
 
 	/// Rebuild a chunk from an old one plus a diff opcode run.
@@ -158,30 +155,44 @@ public:
 	                                  std::span<const uint8_t> digest,
 	                                  std::span<const uint8_t> opcodes)
 	{
-		std::vector<uint8_t> record;
-		record.reserve(1 + 2 * VARINT_MAX_BYTES + digest.size() + opcodes.size());
-		record.push_back(static_cast<uint8_t>(EntryType::MODIFIED_CHUNK));
-		push_varint(record, old_index);
-		push_varint(record, out_size);
-		record.insert(record.end(), digest.begin(), digest.end());
-		record.insert(record.end(), opcodes.begin(), opcodes.end());
-		return emit(record, "MODIFIED entry");
+		return emitRecord(EntryType::MODIFIED_CHUNK, {old_index, out_size}, digest, opcodes,
+		                  "MODIFIED entry");
 	}
 
 	[[nodiscard]] bool write_trailer(std::span<const uint8_t> digest)
 	{
-		std::vector<uint8_t> trailer;
-		trailer.reserve(1 + digest.size());
-		trailer.push_back(DELTA_TRAILER_TAG);
-		trailer.insert(trailer.end(), digest.begin(), digest.end());
-		return emit(trailer, "delta trailer");
+		const uint8_t tag = DELTA_TRAILER_TAG;
+		return emit({&tag, 1}, "delta trailer") && emit(digest, "delta trailer");
 	}
 
 	[[nodiscard]] size_t bytes_written() const noexcept { return bytes_written_; }
 	[[nodiscard]] const std::string& error() const noexcept { return error_; }
 
 private:
-	bool emit(const std::vector<uint8_t>& bytes, const char* what)
+	// Tag, varint fields and digest, then the body straight from the caller's
+	// buffer rather than copied into the record.
+	bool emitRecord(EntryType type, std::initializer_list<uint64_t> fields,
+	                std::span<const uint8_t> digest, std::span<const uint8_t> body,
+	                const char* what)
+	{
+		if (fields.size() > 2 || digest.size() != DELTA_DIGEST_BYTES) {
+			error_ = std::string("Invalid ") + what;
+			return false;
+		}
+		uint8_t head[1 + 2 * VARINT_MAX_BYTES + DELTA_DIGEST_BYTES];
+		size_t length = 0;
+		head[length++] = static_cast<uint8_t>(type);
+		for (uint64_t value : fields) {
+			for (; value >= 0x80; value >>= 7)
+				head[length++] = static_cast<uint8_t>(value) | 0x80;
+			head[length++] = static_cast<uint8_t>(value);
+		}
+		std::memcpy(head + length, digest.data(), DELTA_DIGEST_BYTES);
+		length += DELTA_DIGEST_BYTES;
+		return emit({head, length}, what) && (body.empty() || emit(body, what));
+	}
+
+	bool emit(std::span<const uint8_t> bytes, const char* what)
 	{
 		if (!out_.write_chunk(bytes)) {
 			error_ = std::string("Failed to write ") + what;
@@ -346,7 +357,28 @@ public:
 			error_ = "Truncated delta: short trailer";
 			return false;
 		}
+		if (in_.peek_byte() != EOF) {
+			error_ = "Unexpected bytes after delta trailer";
+			return false;
+		}
+		if (in_.has_error()) {
+			error_ = "Failed to read delta trailer";
+			return false;
+		}
 		return true;
+	}
+
+	[[nodiscard]] bool finish(bool saw_trailer) {
+		if (in_.has_error()) error_ = "Failed to read delta";
+		else if (!saw_trailer) error_ = "Missing delta trailer";
+		else return true;
+		return false;
+	}
+	[[nodiscard]] bool io_error() const noexcept { return in_.has_error(); }
+	[[nodiscard]] bool finish_diff(size_t opcodes) {
+		if (opcodes != 0) return true;
+		error_ = "MODIFIED entry has no diff opcodes";
+		return false;
 	}
 
 	[[nodiscard]] const std::string& error() const noexcept { return error_; }

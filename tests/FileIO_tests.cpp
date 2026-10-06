@@ -1,3 +1,4 @@
+#include "TestWorkspace.hpp"
 #include "gtest/gtest.h"
 #include "FileIO.hpp"
 
@@ -5,6 +6,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -15,7 +17,7 @@ namespace {
 std::string make_test_path()
 {
 	static std::atomic<unsigned> counter{0};
-	const auto p = std::filesystem::temp_directory_path() /
+	const auto p = testfiles::directory() /
 	               ("roll_fio_" + std::to_string(counter++) + "_test_file");
 	return p.string();
 }
@@ -294,4 +296,74 @@ TEST(FileIO, close_reports_success_after_writing)
 
 	EXPECT_EQ(std::filesystem::file_size(path), payload.size());
 	remove_file(path);
+}
+
+TEST(FileIO, grown_inout_file_can_be_read_in_full)
+{
+	const auto path = make_test_path();
+	testfiles::write(path, std::vector<uint8_t>{1, 2, 3});
+	FileIO file;
+	ASSERT_TRUE(file.open(path, FileMode::INOUT));
+	const std::vector<uint8_t> extended{1, 2, 3, 4, 5, 6};
+	ASSERT_TRUE(file.write_chunk(extended));
+	EXPECT_EQ(file.read_chunk(6, 0), extended);
+	EXPECT_FALSE(file.has_error());
+	EXPECT_FALSE(file.is_eof());
+	EXPECT_TRUE(file.close());
+}
+
+TEST(FileIO, empty_file_bounds_an_extreme_read_request)
+{
+	const auto path = make_test_path();
+	testfiles::write(path, {});
+	FileIO file;
+	ASSERT_TRUE(file.open(path, FileMode::IN));
+	EXPECT_TRUE(file.read_chunk(std::numeric_limits<size_t>::max()).empty());
+	EXPECT_TRUE(file.is_eof());
+	EXPECT_FALSE(file.has_error());
+	EXPECT_TRUE(file.close());
+}
+
+TEST(FileIO, invalid_seek_is_distinct_from_eof_and_stays_failed)
+{
+	const auto path = make_test_path();
+	prepare_file(path);
+	FileIO file;
+	ASSERT_TRUE(file.open(path, FileMode::IN));
+	EXPECT_TRUE(file.read_chunk(1, std::numeric_limits<size_t>::max()).empty());
+	EXPECT_TRUE(file.has_error());
+	EXPECT_FALSE(file.is_eof());
+	EXPECT_TRUE(file.read_chunk(1, 0).empty());
+	EXPECT_FALSE(file.close());
+	ASSERT_TRUE(file.open(path, FileMode::IN));
+	EXPECT_FALSE(file.has_error());
+	EXPECT_EQ(file.read_byte(), 'T');
+}
+
+TEST(FileIO, exclusive_output_does_not_truncate_an_existing_file)
+{
+	const auto path = make_test_path();
+	prepare_file(path);
+	const auto before = testfiles::read(path);
+	FileIO file;
+	EXPECT_FALSE(file.open(path, FileMode::EXCLUSIVE_OUT));
+	EXPECT_EQ(testfiles::read(path), before);
+}
+
+TEST(FileIO, moving_transfers_buffered_bytes_and_resets_the_source)
+{
+	const auto path = make_test_path();
+	prepare_file(path);
+	FileIO source;
+	ASSERT_TRUE(source.open(path, FileMode::IN));
+	EXPECT_EQ(source.read_byte(), 'T');
+	FileIO moved(std::move(source));
+	EXPECT_EQ(source.read_byte(), EOF);
+	EXPECT_EQ(source.size(), 0u);
+	EXPECT_EQ(moved.read_byte(), 'h');
+	FileIO assigned;
+	assigned = std::move(moved);
+	EXPECT_EQ(moved.peek_byte(), EOF);
+	EXPECT_EQ(assigned.read_byte(), 'i');
+	EXPECT_TRUE(assigned.close());
 }

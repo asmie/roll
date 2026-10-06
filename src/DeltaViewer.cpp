@@ -113,7 +113,7 @@ bool parseDiffData(DeltaReader& reader, size_t& diffSize, size_t& opCount) {
 		std::cout << "        ... and " << (opCount - maxPrintedOps)
 		          << " more diff opcodes" << std::endl;
 	}
-	return true;
+	return reader.finish_diff(opCount);
 }
 
 } // namespace
@@ -122,7 +122,7 @@ int view_delta(const std::filesystem::path& delta_file) {
 	FileIO file;
 	if (!file.open(delta_file, FileMode::IN)) {
 		std::cerr << "Error: Cannot open file " << delta_file << std::endl;
-		return 1;
+		return 2;
 	}
 
 	std::cout << "Delta File Viewer - Analyzing: " << delta_file << std::endl;
@@ -135,11 +135,12 @@ int view_delta(const std::filesystem::path& delta_file) {
 	DeltaReader reader(file, BLAKE2b::HASH_SIZE);
 	if (!reader.read_header()) {
 		std::cerr << "Error: " << reader.error() << std::endl;
-		return 1;
+		return reader.io_error() ? 2 : 1;
 	}
 	std::cout << "Format version: " << DELTA_FORMAT_VERSION << std::endl << std::endl;
 
-	int chunkNum = 0;
+	size_t chunkNum = 0;
+	bool saw_trailer = false;
 	while (true) {
 		const auto item = reader.next_item();
 		if (item == DeltaReader::Item::End) break;
@@ -148,11 +149,12 @@ int view_delta(const std::filesystem::path& delta_file) {
 			std::vector<uint8_t> trailer;
 			if (!reader.read_trailer(trailer)) {
 				std::cerr << "Error: " << reader.error() << std::endl;
-				return 1;
+				return reader.io_error() ? 2 : 1;
 			}
 			std::cout << "Whole-file hash: ";
 			printHex(trailer);
 			std::cout << std::endl;
+			saw_trailer = true;
 			break;
 		}
 
@@ -160,7 +162,7 @@ int view_delta(const std::filesystem::path& delta_file) {
 		if (!reader.read_entry_header(header)) {
 			std::cerr << "Error: " << reader.error() << " in chunk #"
 			          << (chunkNum + 1) << std::endl;
-			return 1;
+			return reader.io_error() ? 2 : 1;
 		}
 
 		std::cout << "Chunk #" << ++chunkNum << ":" << std::endl;
@@ -179,7 +181,7 @@ int view_delta(const std::filesystem::path& delta_file) {
 			if (!reader.read_payload(static_cast<size_t>(header.out_size), rawData)) {
 				std::cerr << "Error: Truncated ADDED payload in chunk #"
 				          << chunkNum << std::endl;
-				return 1;
+				return reader.io_error() ? 2 : 1;
 			}
 
 			std::cout << "  Added Data (first 50 chars): \"";
@@ -194,19 +196,21 @@ int view_delta(const std::filesystem::path& delta_file) {
 			if (!parseDiffData(reader, diffSize, opCount)) {
 				std::cerr << "Error: " << reader.error() << " in chunk #"
 				          << chunkNum << std::endl;
-				return 1;
+				return reader.io_error() ? 2 : 1;
 			}
 
 			std::cout << "  Diff Data Size: " << diffSize << " bytes" << std::endl;
 			std::cout << "  Diff Opcode Count: " << opCount << std::endl;
-			if (opCount == 0) {
-				std::cout << "  No diff data found (chunks might be identical)" << std::endl;
-			}
+
 		}
 
 		std::cout << std::endl;
 	}
 
+	if (!reader.finish(saw_trailer)) {
+		std::cerr << "Error: " << reader.error() << std::endl;
+		return reader.io_error() ? 2 : 1;
+	}
 	std::cout << "========================================" << std::endl;
 	std::cout << "Total chunks processed: " << chunkNum << std::endl;
 

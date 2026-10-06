@@ -197,3 +197,21 @@ TEST(RKfinger, small_mersenne_modulus_matches_naive)
 			<< "diverged from the naive reference at byte " << i;
 	}
 }
+
+TEST(RKfinger, rejects_overflowing_custom_parameters)
+{
+	EXPECT_THROW(RKFinger(256, 48, uint64_t{18446744073709551557ULL}), std::invalid_argument);
+	EXPECT_THROW(RKFinger(256, 48, uint64_t{1} << 63), std::invalid_argument);
+	EXPECT_THROW(RKFinger(0, 48, 123009), std::invalid_argument);
+}
+
+TEST(RKfinger, small_bases_handle_the_full_byte_range)
+{
+	const auto data = patterned_data(2048, 0x1234u);
+	for (unsigned base : {1u, 2u, 17u}) {
+		RKFinger rk(base, 16, 1023);
+		ASSERT_TRUE(rk.initialize(std::span<const uint8_t>(data).first(16)));
+		for (size_t i = 16; i < data.size(); ++i)
+			EXPECT_EQ(rk.compute_next(data[i]), naive_window_hash(std::span<const uint8_t>(data).subspan(i - 15, 16), base, 1023));
+	}
+}

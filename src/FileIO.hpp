@@ -13,7 +13,8 @@
 enum class FileMode {
 	IN,
 	OUT,
-	INOUT
+	INOUT,
+	EXCLUSIVE_OUT
 };
 
 /**
@@ -29,8 +30,8 @@ public:
 	FileIO& operator=(const FileIO&) = delete;
 
 	// Allow move operations
-	FileIO(FileIO&&) = default;
-	FileIO& operator=(FileIO&&) = default;
+	FileIO(FileIO&& other);
+	FileIO& operator=(FileIO&& other);
 
 	/**
 	* Open file with given mode.
@@ -120,10 +121,13 @@ public:
 		return rpos_ == rlen_ && f_.eof();
 	}
 
+	/// Sticky I/O error, distinct from a normal short read at EOF. Reset by open().
+	[[nodiscard]] bool has_error() const noexcept { return io_error_; }
+
 	/**
 	* Size of the file as measured when open() succeeded, in bytes. Zero if the
-	* file is not open or its size could not be queried. Not updated by writes,
-	* so this is only meaningful for files opened for reading.
+	* file is not open. Updated after writes through this handle. Reads do not
+	* clamp to this snapshot: another writer may have extended the file.
 	*/
 	[[nodiscard]] size_t size() const noexcept {
 		return size_;
@@ -146,6 +150,8 @@ private:
 
 	std::fstream f_;
 	size_t size_ { 0 };
+	bool io_error_ { false };
+	bool readable_ { false };
 
 	// Read-ahead buffer backing read_byte()/peek_byte(). Signature consumes
 	// whole files a byte at a time, and std::fstream::get() per byte measured

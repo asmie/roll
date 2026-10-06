@@ -24,8 +24,8 @@ inline constexpr uint8_t DELTA_TRAILER_TAG = 0xFF;
 // Per-entry digest length, truncated from the strong hash.
 //
 // 128 bits is the identity of a chunk and the verification of a generated
-// payload: distinguishing chunks needs collision resistance, not preimage
-// resistance, and 2^-128 is far below any other failure mode here. Thousands of
+// payload. A random pair collides with probability about 2^-128; generic
+// birthday collision search has about 2^64 work. Thousands of
 // these appear in a delta, so the 48 bytes saved against a full BLAKE2b-512
 // digest dominate the format's overhead. The whole-file trailer is deliberately
 // *not* truncated — there is exactly one, so its size is irrelevant and full

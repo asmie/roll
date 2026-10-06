@@ -6,6 +6,7 @@
 #include "DeltaError.hpp"
 #include "DeltaFormat.hpp"
 #include "FileIO.hpp"
+#include "OutputTransaction.hpp"
 #include "Signature.hpp"
 
 #include <algorithm>
@@ -48,25 +49,14 @@ public:
 	                                 const std::filesystem::path& delta_file_path,
 	                                 const std::filesystem::path& output_file_path)
 	{
-		bool output_opened = false;
 		Result result;
-		// Convert escaping exceptions into a failed Result so the stub cleanup
-		// below still runs. Without this, an exception (a hash-backend error, a
-		// bad_alloc) unwinds past the cleanup and leaves a partial output file
-		// that looks like a successful reconstruction.
+		// Convert escaping exceptions into a failed Result. Unwinding destroys
+		// the output transaction, which discards the staged file.
 		try {
-			result = apply_delta_impl(old_file_path, delta_file_path, output_file_path,
-			                         output_opened);
+			result = apply_delta_impl(old_file_path, delta_file_path, output_file_path);
 		} catch (const std::exception& e) {
 			result = std::unexpected(DeltaError{DeltaErrc::internal_error,
 			                                    std::string("Unexpected error: ") + e.what()});
-		}
-		// Don't leave a half-written stub on disk: if we opened the output and
-		// the run failed, remove the file. Alias checks run before open, so we
-		// will never delete the user's old/delta here.
-		if (!result.has_value() && output_opened) {
-			std::error_code ec;
-			std::filesystem::remove(output_file_path, ec);
 		}
 		return result;
 	}
@@ -74,32 +64,11 @@ public:
 private:
 	Result apply_delta_impl(const std::filesystem::path& old_file_path,
 	                        const std::filesystem::path& delta_file_path,
-	                        const std::filesystem::path& output_file_path,
-	                        bool& output_opened)
+	                        const std::filesystem::path& output_file_path)
 	{
 		ApplyStats stats;
 
-		// Reject output paths that alias either input. Opening the output in
-		// FileMode::OUT truncates the target, which would destroy old or delta
-		// before they're read. std::filesystem::equivalent compares filesystem
-		// objects, so symlinks/hardlinks/relative paths to the same file are
-		// caught — but it requires both paths to exist, hence the exists guard.
-		{
-			namespace fs = std::filesystem;
-			std::error_code ec;
-			if (fs::exists(output_file_path, ec)) {
-				if (fs::equivalent(output_file_path, old_file_path, ec)) {
-					return std::unexpected(DeltaError{DeltaErrc::invalid_argument,
-					                                    "Output path aliases the old file"});
-				}
-				if (fs::equivalent(output_file_path, delta_file_path, ec)) {
-					return std::unexpected(DeltaError{DeltaErrc::invalid_argument,
-					                                    "Output path aliases the delta file"});
-				}
-			}
-		}
-
-		FileIO old_file, delta, output;
+		FileIO old_file, delta;
 		if (!old_file.open(old_file_path, FileMode::IN)) {
 			return std::unexpected(DeltaError{DeltaErrc::io_error,
 			                                    "Failed to open old file: " + old_file_path.string()});
@@ -108,15 +77,14 @@ private:
 			return std::unexpected(DeltaError{DeltaErrc::io_error,
 			                                    "Failed to open delta file: " + delta_file_path.string()});
 		}
-		if (!output.open(output_file_path, FileMode::OUT)) {
-			return std::unexpected(DeltaError{DeltaErrc::io_error,
-			                                    "Failed to create output file: " + output_file_path.string()});
-		}
-		output_opened = true;
+		OutputTransaction transaction;
+		if (auto opened = transaction.open(output_file_path, {old_file_path, delta_file_path}); !opened)
+			return std::unexpected(opened.error());
+		auto& output = transaction.file();
 
 		DeltaReader reader(delta, U{}.get_hash_size());
 		if (!reader.read_header()) {
-			return std::unexpected(DeltaError{DeltaErrc::corrupt_delta, reader.error()});
+			return std::unexpected(DeltaError{reader.io_error() ? DeltaErrc::io_error : DeltaErrc::corrupt_delta, reader.error()});
 		}
 
 		Signature<T, U> old_sig;
@@ -139,7 +107,7 @@ private:
 			if (item == DeltaReader::Item::Trailer) {
 				std::vector<uint8_t> trailer;
 				if (!reader.read_trailer(trailer)) {
-					return std::unexpected(DeltaError{DeltaErrc::corrupt_delta, reader.error()});
+					return std::unexpected(DeltaError{reader.io_error() ? DeltaErrc::io_error : DeltaErrc::corrupt_delta, reader.error()});
 				}
 				std::vector<uint8_t> computed(trailer_size);
 				whole_file_hash.finalize(computed);
@@ -153,7 +121,7 @@ private:
 
 			DeltaEntryHeader header;
 			if (!reader.read_entry_header(header)) {
-				return std::unexpected(DeltaError{DeltaErrc::corrupt_delta, reader.error()});
+				return std::unexpected(DeltaError{reader.io_error() ? DeltaErrc::io_error : DeltaErrc::corrupt_delta, reader.error()});
 			}
 
 			// Resolve the referenced old chunk once, for both entry kinds that
@@ -184,7 +152,7 @@ private:
 						                                    "ORIGINAL entry digest does not match the old chunk"});
 					}
 					produced = old_file.read_chunk(source->chunk_size, source->start_offset);
-					if (produced.size() != source->chunk_size) {
+					if (old_file.has_error() || produced.size() != source->chunk_size) {
 						return std::unexpected(DeltaError{DeltaErrc::io_error,
 						                                    "Failed to read old chunk"});
 					}
@@ -193,8 +161,8 @@ private:
 
 				case EntryType::ADDED_CHUNK: {
 					if (!reader.read_payload(static_cast<size_t>(header.out_size), produced)) {
-						return std::unexpected(DeltaError{DeltaErrc::corrupt_delta,
-						                                    "Truncated delta: short ADDED payload"});
+						return std::unexpected(DeltaError{reader.io_error() ? DeltaErrc::io_error : DeltaErrc::corrupt_delta,
+						                                    reader.error()});
 					}
 					if (!verifyDigest(hash_func, produced, header.digest)) {
 						return std::unexpected(DeltaError{DeltaErrc::integrity_mismatch,
@@ -205,7 +173,7 @@ private:
 
 				case EntryType::MODIFIED_CHUNK: {
 					auto old_data = old_file.read_chunk(source->chunk_size, source->start_offset);
-					if (old_data.size() != source->chunk_size) {
+					if (old_file.has_error() || old_data.size() != source->chunk_size) {
 						return std::unexpected(DeltaError{DeltaErrc::io_error,
 						                                    "Failed to read MODIFIED source chunk"});
 					}
@@ -231,17 +199,15 @@ private:
 			stats.entries_processed++;
 		}
 
-		if (!saw_trailer) {
-			return std::unexpected(DeltaError{DeltaErrc::corrupt_delta,
-			                                    "Missing delta trailer"});
+		if (!reader.finish(saw_trailer)) {
+			return std::unexpected(DeltaError{reader.io_error() ? DeltaErrc::io_error : DeltaErrc::corrupt_delta,
+			                                    reader.error()});
 		}
 
-		(void) old_file.close();  // reads have nothing to flush
-		(void) delta.close();
-		if (!output.close()) {
-			return std::unexpected(DeltaError{DeltaErrc::io_error,
-			                                    "Failed to flush output file"});
-		}
+		if (!old_file.close() || !delta.close())
+			return std::unexpected(DeltaError{DeltaErrc::io_error, "Failed to close input files"});
+		if (auto committed = transaction.commit(); !committed)
+			return std::unexpected(committed.error());
 
 		return stats;
 	}
@@ -275,7 +241,7 @@ private:
 		while (reader.at_diff_opcode()) {
 			DiffOpcode opcode;
 			if (!reader.read_diff_opcode(opcode)) {
-				error = DeltaError{DeltaErrc::corrupt_delta, reader.error()};
+				error = DeltaError{reader.io_error() ? DeltaErrc::io_error : DeltaErrc::corrupt_delta, reader.error()};
 				return false;
 			}
 			++opcodes_seen;
@@ -285,8 +251,8 @@ private:
 				return false;
 			}
 			size_t match_len = opcode.pos - new_pos;
-			if (old_pos + match_len > old_data.size() ||
-			    output.size() + match_len > target_size) {
+			if (match_len > old_data.size() - old_pos ||
+			    match_len > target_size - output.size()) {
 				error = DeltaError{DeltaErrc::corrupt_delta, "Diff out of bounds (match copy)"};
 				return false;
 			}
@@ -298,21 +264,21 @@ private:
 
 			if (opcode.op == 'D' || opcode.op == 'I') {
 				const size_t count = opcode.bytes.size();
-				if (output.size() + count > target_size) {
+				if (count > target_size - output.size()) {
 					error = DeltaError{DeltaErrc::corrupt_delta, "Diff out of bounds (inline write)"};
 					return false;
 				}
 				output.insert(output.end(), opcode.bytes.begin(), opcode.bytes.end());
 				new_pos += count;
 				if (opcode.op == 'D') {
-					if (old_pos + count > old_data.size()) {
+					if (count > old_data.size() - old_pos) {
 						error = DeltaError{DeltaErrc::corrupt_delta, "Diff out of bounds (D advance)"};
 						return false;
 					}
 					old_pos += count;
 				}
 			} else { // 'X'
-				if (old_pos + opcode.delete_length > old_data.size()) {
+				if (opcode.delete_length > old_data.size() - old_pos) {
 					error = DeltaError{DeltaErrc::corrupt_delta, "Diff out of bounds (X delete)"};
 					return false;
 				}
@@ -320,15 +286,15 @@ private:
 			}
 		}
 
-		if (opcodes_seen == 0) {
-			error = DeltaError{DeltaErrc::corrupt_delta, "MODIFIED entry has no diff opcodes"};
+		if (!reader.finish_diff(opcodes_seen)) {
+			error = DeltaError{DeltaErrc::corrupt_delta, reader.error()};
 			return false;
 		}
 
 		// Tail copy: any remaining target bytes come from the matching old-data tail.
 		if (output.size() < target_size) {
 			size_t remaining = target_size - output.size();
-			if (old_pos + remaining > old_data.size()) {
+			if (remaining > old_data.size() - old_pos) {
 				error = DeltaError{DeltaErrc::corrupt_delta, "Diff tail copy out of bounds"};
 				return false;
 			}

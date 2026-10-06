@@ -25,20 +25,26 @@ hashing, file I/O, signatures, delta application, and rolling fingerprints.
   chunk to change.
 - Adaptive chunk boundaries with a 512 byte minimum, 16 KiB maximum, and an
   8 KiB target average chunk size.
-- Dual chunk identity checks using a rolling fingerprint plus BLAKE2b-512.
-- Delta entries for original, added, modified, and removed chunks.
+- Chunk identity checks using a 128-bit prefix of BLAKE2b-512 plus chunk length;
+  rolling fingerprints select boundaries.
+- Delta entries for original, added, and modified chunks. Unreferenced old chunks
+  need no removal records.
 - Repeated content is reused rather than re-sent: a reordered or duplicated block
   costs a ~19-byte reference per occurrence instead of a full copy. Doubling a
   40 MB zero-filled file produces a 103 KB delta.
 - A byte-level diff is emitted only when it is actually smaller than storing the
   chunk outright, which bounds a delta at roughly the size of its input.
 - Delta application verifies each generated payload against its chunk hash and
-  the whole reconstructed file against a trailer hash, and refuses an output path
-  that aliases either input.
+  the whole reconstructed file against a trailer hash. Both creation and application
+  reject output paths that alias an input and stage writes in an exclusively created
+  temporary file beside the destination. Successful validation and close precede
+  replacement; failures preserve an existing destination. Successful replacement
+  keeps the destination's permissions but replaces a destination symlink or hard
+  link itself, leaving its former target or other names intact.
 
 ## Requirements
 
-- CMake 3.16 or newer (3.19+ to use the configure presets).
+- CMake 3.24 or newer, including when using presets.
 - A C++23 compiler and standard library — see *Compiler requirements* below, as
   one plausible-looking combination does not work.
 - OpenSSL 1.1.0 or newer, for BLAKE2b-512 via the EVP digest interface. This is
@@ -83,6 +89,7 @@ cmake --build build --config Release
 | --- | --- | --- |
 | `BUILD_TESTING` | `ON` | `OFF` skips the test target, so GoogleTest is not downloaded and configure needs no network |
 | `RH_BUILD_TESTS` | follows `BUILD_TESTING` | Overrides the test target independently |
+| `RH_WARNINGS_AS_ERRORS` | `OFF` | Treats project warnings as errors; enabled in CI |
 | `RH_ENABLE_ASAN` | `OFF` | Builds with AddressSanitizer and UBSan |
 
 ### Fuzzing
@@ -93,15 +100,20 @@ cmake --build build --config Release
 cmake -B build-fuzz -DCMAKE_BUILD_TYPE=Debug -DRH_BUILD_FUZZERS=ON -DBUILD_TESTING=OFF
 cmake --build build-fuzz -j$(nproc)
 ./fuzz/make_corpus.sh build-fuzz/rolling_hash corpus
-build-fuzz/fuzz_apply corpus -max_total_time=60      # libFuzzer builds
-build-fuzz/fuzz_apply_replay corpus/*.delta          # otherwise
+build-fuzz/fuzz_apply corpus/apply -max_total_time=60      # libFuzzer builds
+build-fuzz/fuzz_apply_replay corpus/apply/*.delta          # otherwise
 ```
 
 `fuzz_apply` drives hostile deltas through both readers; `fuzz_roundtrip`
 generates a delta between two halves of the input and requires an exact
 reconstruction. Both check invariants beyond "did not crash": a failed apply
-must leave no output file, a successful one must be deterministic, and a
-freshly generated delta must always apply.
+must preserve an existing destination and leave no new output, a successful one
+must be deterministic and accepted by the viewer, and a freshly generated delta
+must always apply. All core sources receive sanitizer and coverage instrumentation
+in libFuzzer builds. The `corpus/apply` seeds use the harness's exact old-file
+fixture; `corpus/roundtrip` contains separate old/new pairs. Run the latter with
+`build-fuzz/fuzz_roundtrip corpus/roundtrip -max_total_time=60` (or
+`build-fuzz/fuzz_roundtrip_replay corpus/roundtrip/*`).
 
 Where the compiler supports libFuzzer these are coverage-guided fuzzers;
 elsewhere they build as replay drivers that re-check the corpus, so the targets
@@ -185,24 +197,37 @@ If `cmp` exits successfully, the reconstructed file matches the new file.
    chunk. A chunk whose content exists anywhere in the old file becomes a
    reference to it rather than a copy — however many times it recurs, and
    without needing a matching entry for old chunks that are simply gone.
-4. Chunks whose content is not in the old file at all are shipped whole;
-   otherwise a modified chunk stores compact byte-level diff opcodes, computed with Myers'
+4. For chunks without an exact old-file match, generation tries a byte-level
+   diff against the old chunk at the same index, computed with Myers'
    O(ND) algorithm (falling back to a greedy diff when the edit distance is
    large):
    - `D`: replace bytes at a position.
    - `I`: insert bytes at a position.
    - `X`: delete bytes at a position.
 
-   The diff is kept only if it costs less than storing the chunk literally;
-   otherwise the chunk is emitted whole.
+   The complete modified record, including its source-index varint, is kept
+   only if it costs less than the complete literal record; otherwise the chunk
+   is emitted whole.
 5. `Apply` reads the old file and delta records in target-file order, verifies
    each generated payload against its recorded hash, and writes the
    reconstructed output. A trailing whole-file hash is checked at the end, so
    truncation or reordering is caught even when every individual chunk verifies.
 
-All multi-byte integer fields are big-endian. The stream carries a format
+Fixed-width integer fields are big-endian; lengths and indices use LEB128 varints. The stream carries a format
 version and readers reject anything they do not recognise, but the format is
 still an internal one: it is not a compatibility promise across versions.
+Readers require exactly one final trailer and reject bytes after it.
+
+Inputs must be stable, seekable regular files. Read and seek failures are distinct
+from EOF. Generation rejects a size change in either input, checks every new chunk
+it copies into the delta against its signature, and re-reads the whole old file to
+confirm it still matches its signature, because the applier resolves records
+against it. Reused new chunks are encoded from the signature without a second
+read, so the delta reproduces the new file as it was signed. These checks reject
+observed changes; they are not a filesystem snapshot or a lock against
+concurrent writers. Use snapshots or otherwise stop writes when that guarantee is
+needed. Atomic destination replacement provides failure isolation, not a promise
+of durability across a power loss.
 
 ## Exit status
 

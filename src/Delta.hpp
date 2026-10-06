@@ -7,6 +7,7 @@
 #include "DeltaFormat.hpp"
 #include "Signature.hpp"
 #include "FileIO.hpp"
+#include "OutputTransaction.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -43,40 +44,16 @@ public:
                          const std::filesystem::path& file_to_check,
                          const std::filesystem::path& delta_file)
     {
-        Progress progress;
-
-        FileIO old, file, delta;
-        if (!openFiles(old, file, delta, oldfile, file_to_check, delta_file, progress))
-            return std::unexpected(std::move(progress.error));
-
-        DeltaWriter writer(delta);
-        if (!writer.write_header())
-            return std::unexpected(DeltaError{DeltaErrc::io_error, writer.error()});
-
-        const auto& original_chunks = original.get_chunks();
-        const auto& new_chunks = newfile.get_chunks();
-
-        ChunkIndex<typename T::RollingHashType> chunk_index(original_chunks);
-        bool ok = processMultipleChunks(original_chunks, new_chunks, chunk_index,
-                                        old, file, writer, progress);
-
-        if (ok)
-            ok = writeTrailer(file, writer, progress, newfile.whole_file_hash());
-
-        // Reads need no flush, so only the delta's close can fail meaningfully.
-        (void) old.close();
-        (void) file.close();
-        if (!delta.close())
-            return std::unexpected(DeltaError{DeltaErrc::io_error,
-                                              "Failed to flush delta file"});
-
-        if (!ok)
-            return std::unexpected(std::move(progress.error));
-
-        return DeltaStats{progress.chunks_processed, writer.bytes_written()};
+        try {
+            return generateImpl(original, newfile, oldfile, file_to_check, delta_file);
+        } catch (const std::exception& e) {
+            return std::unexpected(DeltaError{DeltaErrc::internal_error, e.what()});
+        }
     }
 
 private:
+    using Chunk = SignedChunk<typename T::RollingHashType>;
+
     // Internal bookkeeping threaded through the generation helpers. Kept
     // separate from the public std::expected so the helpers can keep reporting
     // failure with a bool and filling in an error as they go.
@@ -85,31 +62,74 @@ private:
         DeltaError error;
     };
 
+    std::expected<DeltaStats, DeltaError> generateImpl(
+        const Signature<T, U>& original, const Signature<T, U>& newfile,
+        const std::filesystem::path& oldfile, const std::filesystem::path& file_to_check,
+        const std::filesystem::path& delta_file) {
+        Progress progress;
+
+        FileIO old, file;
+        if (!openFiles(old, file, oldfile, file_to_check, progress))
+            return std::unexpected(std::move(progress.error));
+
+        OutputTransaction transaction;
+        if (auto opened = transaction.open(delta_file, {oldfile, file_to_check}); !opened)
+            return std::unexpected(opened.error());
+
+        const auto& original_chunks = original.get_chunks();
+        const auto& new_chunks = newfile.get_chunks();
+
+        // The signatures come from an earlier pass. A size change is the
+        // cheapest sign that an input changed since then.
+        if (!coversExactly(original_chunks, old.size()) || !coversExactly(new_chunks, file.size()))
+            return std::unexpected(DeltaError{DeltaErrc::integrity_mismatch,
+                                              "Input size changed since signature generation"});
+
+        DeltaWriter writer(transaction.file());
+        if (!writer.write_header())
+            return std::unexpected(DeltaError{DeltaErrc::io_error, writer.error()});
+
+        ChunkIndex<typename T::RollingHashType> chunk_index(original_chunks);
+        if (!processMultipleChunks(original_chunks, new_chunks, chunk_index,
+                                   old, file, writer, progress) ||
+            !verifyOldFile(original_chunks, old, progress) ||
+            !writeTrailer(new_chunks, file, writer, progress, newfile.whole_file_hash()))
+            return std::unexpected(std::move(progress.error));
+
+        if (!old.close() || !file.close())
+            return std::unexpected(DeltaError{DeltaErrc::io_error, "Failed to read input files"});
+        if (auto committed = transaction.commit(); !committed)
+            return std::unexpected(committed.error());
+
+        return DeltaStats{progress.chunks_processed, writer.bytes_written()};
+    }
+
     // Emit (DELTA_TRAILER_TAG | hash) so the applier can verify end-to-end
     // reconstruction, not just per-chunk hashes. When the new file's Signature
     // was generated with WholeFileHash::Compute its digest is reused; otherwise
-    // the file is stream-hashed here, which costs a full second read of it.
-    bool writeTrailer(FileIO& file, DeltaWriter& writer, Progress& progress,
-                      std::span<const uint8_t> precomputed) {
-        std::vector<uint8_t> digest;
-
-        if (!precomputed.empty()) {
-            digest.assign(precomputed.begin(), precomputed.end());
-        } else {
-            U hash_func;
+    // the new file is read again chunk by chunk, verified against its
+    // signature, and hashed here.
+    bool writeTrailer(const std::vector<Chunk>& new_chunks, FileIO& file, DeltaWriter& writer,
+                      Progress& progress, std::span<const uint8_t> precomputed) {
+        std::vector<uint8_t> digest(precomputed.begin(), precomputed.end());
+        if (digest.empty()) {
+            U hash_func, chunk_hash;
             hash_func.init();
-
-            constexpr size_t STREAM_CHUNK = 64 * 1024;
-            auto buf = file.read_chunk(STREAM_CHUNK, 0);
-            while (!buf.empty()) {
-                hash_func.update(buf);
-                buf = file.read_chunk(STREAM_CHUNK);
+            std::vector<uint8_t> data;
+            for (const auto& chunk : new_chunks) {
+                if (!readSignedChunk(file, chunk, chunk_hash, data, progress))
+                    return false;
+                hash_func.update(data);
             }
-
             digest.resize(hash_func.get_hash_size());
             hash_func.finalize(digest);
         }
 
+        if (!file.read_chunk(1, file.size()).empty() || file.has_error()) {
+            progress.error = DeltaError{DeltaErrc::integrity_mismatch,
+                                        "New input changed or failed while reading"};
+            return false;
+        }
         if (!writer.write_trailer(digest)) {
             progress.error = DeltaError{DeltaErrc::io_error, writer.error()};
             return false;
@@ -120,9 +140,9 @@ private:
     /**
     * Open all required files with error handling
     */
-    bool openFiles(FileIO& old, FileIO& file, FileIO& delta,
+    bool openFiles(FileIO& old, FileIO& file,
                    const std::filesystem::path& oldfile, const std::filesystem::path& file_to_check,
-                   const std::filesystem::path& delta_file, Progress& progress) {
+                   Progress& progress) {
         if (!old.open(oldfile, FileMode::IN)) {
             progress.error = DeltaError{DeltaErrc::io_error,
                                         "Failed to open old file: " + oldfile.string()};
@@ -133,9 +153,57 @@ private:
                                         "Failed to open new file: " + file_to_check.string()};
             return false;
         }
-        if (!delta.open(delta_file, FileMode::OUT)) {
-            progress.error = DeltaError{DeltaErrc::io_error,
-                                        "Failed to create delta file: " + delta_file.string()};
+        return true;
+    }
+
+    // True when the chunks tile [0, size) with valid lengths.
+    static bool coversExactly(const std::vector<Chunk>& chunks, size_t size) {
+        size_t covered = 0;
+        for (const auto& chunk : chunks) {
+            if (chunk.start_offset != covered || chunk.chunk_size == 0 ||
+                chunk.chunk_size > DELTA_MAX_CHUNK_SIZE || chunk.chunk_size > size - covered)
+                return false;
+            covered += chunk.chunk_size;
+        }
+        return covered == size;
+    }
+
+    // Read one signed chunk and require the bytes the signature described.
+    // A short read, an I/O error, or a digest mismatch all fail generation, so
+    // no record is built from bytes that differ from the signed content.
+    bool readSignedChunk(FileIO& file, const Chunk& chunk, U& hasher,
+                         std::vector<uint8_t>& data, Progress& progress) {
+        data = file.read_chunk(chunk.chunk_size, chunk.start_offset);
+        if (file.has_error() || data.size() != chunk.chunk_size) {
+            progress.error = DeltaError{DeltaErrc::io_error, "Failed to read signed input chunk"};
+            return false;
+        }
+        std::vector<uint8_t> digest(hasher.get_hash_size());
+        hasher.hash(digest, data);
+        if (chunk.hash.size() != DELTA_DIGEST_BYTES || digest.size() < DELTA_DIGEST_BYTES ||
+            !std::equal(chunk.hash.begin(), chunk.hash.end(), digest.begin())) {
+            progress.error = DeltaError{DeltaErrc::integrity_mismatch,
+                                        "Input changed since signature generation"};
+            return false;
+        }
+        return true;
+    }
+
+    // Apply resolves every record against a fresh chunking of the old file, so
+    // a change anywhere in it -- even in a chunk nothing references, whose
+    // boundaries decide later indices -- would make the delta unusable. This
+    // runs after the records are built, so it also covers the old bytes that
+    // MODIFIED diffs were computed from.
+    bool verifyOldFile(const std::vector<Chunk>& original_chunks, FileIO& old, Progress& progress) {
+        U hasher;
+        std::vector<uint8_t> data;
+        for (const auto& chunk : original_chunks) {
+            if (!readSignedChunk(old, chunk, hasher, data, progress))
+                return false;
+        }
+        if (!old.read_chunk(1, old.size()).empty() || old.has_error()) {
+            progress.error = DeltaError{DeltaErrc::integrity_mismatch,
+                                        "Old input changed or failed while reading"};
             return false;
         }
         return true;
@@ -152,19 +220,22 @@ private:
     * the REMOVED entries whose only job was to let the applier check it. Old
     * chunks that nothing references are simply never mentioned.
     */
-    bool processMultipleChunks(const std::vector<SignedChunk<typename T::RollingHashType>>& original_chunks,
-                               const std::vector<SignedChunk<typename T::RollingHashType>>& new_chunks,
+    bool processMultipleChunks(const std::vector<Chunk>& original_chunks,
+                               const std::vector<Chunk>& new_chunks,
                                ChunkIndex<typename T::RollingHashType>& chunk_index,
                                FileIO& old, FileIO& file, DeltaWriter& writer, Progress& progress) {
         // No chunk is ever consumed now, so nothing is ever marked used; the
         // index still wants the flags, and an all-false view means every
         // position stays available for reuse.
         const std::vector<bool> none_used(original_chunks.size(), false);
+        U hasher;
 
         for (size_t i = 0; i < new_chunks.size(); ++i) {
             // Reuse verbatim: prefer the same position, since a same-position
             // match keeps the source of a later MODIFIED entry nearby and costs
-            // the smallest index varint.
+            // the smallest index varint. The record reproduces the signed
+            // content, so the new file is not read here; verifyOldFile checks
+            // the source afterwards.
             size_t source = 0;
             bool reusable = false;
             if (i < original_chunks.size() && original_chunks[i] == new_chunks[i]) {
@@ -183,37 +254,39 @@ private:
                 continue;
             }
 
+            std::vector<uint8_t> new_data;
+            if (!readSignedChunk(file, new_chunks[i], hasher, new_data, progress))
+                return false;
+
             // Otherwise rebuild from the same-position old chunk if a diff pays
             // for itself, and fall back to shipping the bytes.
             if (i < original_chunks.size()) {
                 auto old_data = old.read_chunk(original_chunks[i].chunk_size,
-                                              original_chunks[i].start_offset);
-                auto new_data = file.read_chunk(new_chunks[i].chunk_size,
-                                               new_chunks[i].start_offset);
+                                               original_chunks[i].start_offset);
+                if (old.has_error() || old_data.size() != original_chunks[i].chunk_size) {
+                    progress.error = DeltaError{DeltaErrc::io_error, "Failed to read old chunk"};
+                    return false;
+                }
 
-                if (!old_data.empty() && !new_data.empty()) {
-                    auto diff = createDiff(old_data, new_data);
+                auto diff = createDiff(old_data, new_data);
 
-                    // Keep the diff only when it costs less than the literal
-                    // bytes. Both representations pay a comparable header, so
-                    // the comparison is against the chunk length itself; without
-                    // this an edit scattered through a chunk could encode larger
-                    // than the bytes it describes.
-                    if (diff.size() < new_chunks[i].chunk_size) {
-                        if (!writer.write_modified(i, new_chunks[i].chunk_size,
-                                                   new_chunks[i].hash, diff)) {
-                            progress.error = DeltaError{DeltaErrc::io_error, writer.error()};
-                            return false;
-                        }
-                        progress.chunks_processed++;
-                        continue;
+                // Keep the diff only when the complete record, source index
+                // included, costs less than the literal one; without this an
+                // edit scattered through a chunk could encode larger than the
+                // bytes it describes.
+                if (!diff.empty() &&
+                    DeltaWriter::modified_size(i, new_data.size(), diff.size()) <
+                        DeltaWriter::added_size(new_data.size())) {
+                    if (!writer.write_modified(i, new_data.size(), new_chunks[i].hash, diff)) {
+                        progress.error = DeltaError{DeltaErrc::io_error, writer.error()};
+                        return false;
                     }
+                    progress.chunks_processed++;
+                    continue;
                 }
             }
 
-            const auto payload = file.read_chunk(new_chunks[i].chunk_size,
-                                                 new_chunks[i].start_offset);
-            if (!writer.write_added(new_chunks[i].hash, payload)) {
+            if (!writer.write_added(new_chunks[i].hash, new_data)) {
                 progress.error = DeltaError{DeltaErrc::io_error, writer.error()};
                 return false;
             }

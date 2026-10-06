@@ -4,6 +4,7 @@
 #include "HashConcepts.hpp"
 
 #include <bit>
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <span>
@@ -35,6 +36,13 @@ public:
 			throw std::invalid_argument("RKFinger: window_size must be > 0");
 		if (modulus_ == 0)
 			throw std::invalid_argument("RKFinger: modulus must be > 0");
+		if (alphabet_size_ == 0)
+			throw std::invalid_argument("RKFinger: alphabet_size must be > 0");
+		// Bound arithmetic before reduce(), including eviction of any byte,
+		// even when the caller chooses a polynomial base smaller than 256.
+		const uint64_t factor = 2 * std::max<uint64_t>(alphabet_size_, 255);
+		if (modulus_ > (std::numeric_limits<uint64_t>::max() - 255) / factor)
+			throw std::invalid_argument("RKFinger: parameters overflow 64-bit intermediate arithmetic");
 		init_state();
 	}
 
@@ -127,13 +135,13 @@ private:
 
 		// Worst case over both call sites is
 		// alphabet_size_ * ((fingerprint_ + modulus_) - t) + byte, where
-		// fingerprint_ and t are < modulus_ and byte < alphabet_size_.
+		// fingerprint_ and t are < modulus_ and byte <= 255.
 		const uint64_t a = alphabet_size_;
 		if (a == 0)
 			return;
-		if (modulus_ > (std::numeric_limits<uint64_t>::max() - a) / (2 * a))
+		if (modulus_ > (std::numeric_limits<uint64_t>::max() - 255) / (2 * std::max<uint64_t>(a, 255)))
 			return;
-		const uint64_t max_input = 2 * a * modulus_ + a;
+		const uint64_t max_input = std::max(2 * a * modulus_ + 255, 255 * (modulus_ - 1));
 
 		if ((max_input >> k) < modulus_)
 			mersenne_shift_ = k;
