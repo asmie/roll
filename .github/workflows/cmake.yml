@@ -36,7 +36,7 @@ jobs:
             os: windows-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Install apt packages
       if: matrix.apt != ''
@@ -67,7 +67,7 @@ jobs:
     name: linux-asan-ubsan
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Configure
       env:
@@ -91,7 +91,7 @@ jobs:
     name: linux-no-tests-install
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Configure without tests
       env:
@@ -129,7 +129,7 @@ jobs:
     name: linux-fuzz
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     # Clang 19+ reports __cpp_concepts as 202002, so it has std::expected with
     # libstdc++ — which libFuzzer's runtime is also built against. Clang 18 with
@@ -166,7 +166,7 @@ jobs:
     name: clang-format
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0
 

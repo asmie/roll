@@ -17,7 +17,8 @@ The single `rolling_hash` binary exposes three subcommands:
 - `view`: print a human-readable inspection of a delta file.
 
 The project also ships `rolling_hash_unit`, a GoogleTest-based suite covering
-hashing, file I/O, signatures, delta application, and rolling fingerprints.
+hashing, file I/O, signatures, delta generation and application, and rolling
+fingerprints. Release history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Features
 
@@ -52,7 +53,7 @@ hashing, file I/O, signatures, delta application, and rolling fingerprints.
   one plausible-looking combination does not work.
 - OpenSSL 1.1.0 or newer, for BLAKE2b-512 via the EVP digest interface. This is
   a hard dependency: configure fails without it.
-- Network access during first configure, because CMake fetches GoogleTest v1.14.0
+- Network access during first configure, because CMake fetches GoogleTest v1.18.0
   for the test target. Configure with `-DBUILD_TESTING=OFF` to skip both.
 
 ## Build
@@ -205,8 +206,11 @@ If `cmp` exits successfully, the reconstructed file matches the new file.
 
 ## How It Works
 
-1. `Signature` reads each input file and splits it into variable-sized chunks.
-2. Every chunk receives a Rabin-Karp rolling fingerprint and a BLAKE2b-512 hash.
+1. `Signature` reads each input file and splits it into variable-sized chunks,
+   cutting where masked bits of a Rabin-Karp rolling fingerprint over the last
+   48 bytes match a fixed target.
+2. Every chunk is identified by its length and a 128-bit prefix of its
+   BLAKE2b-512 hash.
 3. `Delta` compares the old and new signatures and emits one entry per new
    chunk. A chunk whose content exists anywhere in the old file becomes a
    reference to it rather than a copy — however many times it recurs, and
@@ -283,9 +287,17 @@ The current test suite covers:
   truncation in the entry header, opcodes, and trailer.
 - The chunk index, including reuse of repeated content.
 - Concept conformance, including implementations that inherit from nothing.
+- Delta generation: record-size selection, a fixed v5 byte vector, and inputs
+  that change, vanish, or turn out to be directories after signing.
 - Delta application for identical files, empty inputs, append and truncate
   cases, in-chunk modifications, malformed and hostile deltas, out-of-range
-  chunk sizes, failure categories, and output alias protection.
+  chunk sizes, failure categories, output alias protection, and `--max-output`.
+- Output staging: existing destinations, links and permissions are preserved on
+  failure, and staged files are removed on errors, exceptions and signals.
+- The CLI's exit-status contract (`tests/cli_tests.cmake`, run by CTest).
+
+Tests create their files in a private temporary directory per process, so
+`ctest --parallel` is safe.
 
 ## Project Layout
 
@@ -303,10 +315,14 @@ src/
   HashConcepts.hpp  requirements on the rolling and strong hash algorithms
   DeltaViewer.*     delta inspection command implementation
   FileIO.*          buffered file I/O helper
+  OutputTransaction.*  staged, synced, atomic replacement of output files
   blake2b.*         BLAKE2b-512 via OpenSSL EVP
   rh_config.h.in    configure-time toolchain probes
 tests/
   *_tests.cpp       GoogleTest unit tests
+  TestWorkspace.hpp per-process temporary directory for test files
+  cli_tests.cmake   CLI exit-status and round-trip checks
+fuzz/               libFuzzer targets, replay driver, and corpus generator
 CMakeLists.txt      build and test configuration
 CMakePresets.json   release / debug / asan / no-tests presets
 ```

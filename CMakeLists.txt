@@ -6,7 +6,7 @@ project(rolling_hash CXX)
 
 # Versioning
 set (RH_VERSION_MAJOR 0)
-set (RH_VERSION_MINOR 2)
+set (RH_VERSION_MINOR 3)
 set (RH_VERSION_REV 0)
 set (RH_VERSION "${RH_VERSION_MAJOR}.${RH_VERSION_MINOR}.${RH_VERSION_REV}" )
 
@@ -267,7 +267,8 @@ if (RH_BUILD_TESTS)
     include(FetchContent)
     FetchContent_Declare(
             googletest
-            URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+            URL https://github.com/google/googletest/archive/refs/tags/v1.18.0.zip
+            URL_HASH SHA256=63b9c77751a5b8f492486005f67533fdc58682b67476fcb91650be5958d5195a
             DOWNLOAD_EXTRACT_TIMESTAMP false
     )
     FetchContent_MakeAvailable(googletest)
